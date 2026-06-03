@@ -38,10 +38,27 @@ class NewsItem:
 
 @dataclass
 class SourceResult:
-    name: str
-    succeeded: bool
-    items_count: int = 0
-    error: str | None = None
+    source_name: str
+    source_type: str
+    status: str  # "success" | "failed"
+    articles_collected: int = 0
+    failure_reason: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "success"
+
+    @property
+    def name(self) -> str:
+        return self.source_name
+
+    @property
+    def items_count(self) -> int:
+        return self.articles_collected
+
+    @property
+    def error(self) -> str | None:
+        return self.failure_reason
 
 
 @dataclass
@@ -69,11 +86,18 @@ class ScrapeResult:
         return round(100 * self.sources_succeeded / self.sources_scanned)
 
     @property
+    def total_articles_collected(self) -> int:
+        return len(self.items)
+
+    @property
     def failed_sources(self) -> list[dict[str, str]]:
         return [
-            {"name": s.name, "error": _short_error(s.error or "Unknown error")}
+            {
+                "name": _display_source_name(s.source_name),
+                "error": s.failure_reason or "Unknown error",
+            }
             for s in self.sources
-            if not s.succeeded
+            if s.status == "failed"
         ]
 
     # Backward-compatible alias for logging
@@ -82,12 +106,33 @@ class ScrapeResult:
         return [f"{s.name}: {s.error}" for s in self.sources if not s.succeeded and s.error]
 
 
-def _short_error(msg: str, max_len: int = 120) -> str:
-    msg = re.sub(r"https?://\S+", "[url]", msg)
-    msg = re.sub(r"\s+", " ", msg).strip()
-    if len(msg) <= max_len:
-        return msg
-    return msg[: max_len - 3] + "..."
+def _display_source_name(name: str) -> str:
+    cleaned = re.sub(r"^(RSS:\s*|API:\s*|X:\s*)", "", name).strip()
+    cleaned = cleaned.replace("r/", "")
+    return cleaned or name
+
+
+def _humanize_error(msg: str | None) -> str:
+    if not msg:
+        return "Unknown error"
+    text = re.sub(r"https?://\S+", "", msg)
+    text = re.sub(r"\s+", " ", text).strip()
+    lower = text.lower()
+    if "403" in text or "forbidden" in lower or "blocked" in lower:
+        return "HTTP 403"
+    if "429" in text or "rate limit" in lower:
+        return "Rate Limit"
+    if "timeout" in lower or "timed out" in lower:
+        return "Timeout"
+    if "parse" in lower:
+        return "Parse Error"
+    if "no rss mirror" in lower or "unavailable" in lower:
+        return "Unavailable"
+    if "connection" in lower:
+        return "Connection Error"
+    if len(text) > 60:
+        return text[:57] + "..."
+    return text or "Unknown error"
 
 
 def _session() -> requests.Session:
@@ -98,22 +143,24 @@ def _session() -> requests.Session:
 
 def _record_source(
     result: ScrapeResult,
-    name: str,
+    source_name: str,
+    source_type: str,
     succeeded: bool,
-    items_count: int = 0,
+    articles_collected: int = 0,
     error: str | None = None,
     stat_key: str | None = None,
 ) -> None:
     result.sources.append(
         SourceResult(
-            name=name,
-            succeeded=succeeded,
-            items_count=items_count,
-            error=_short_error(error) if error else None,
+            source_name=source_name,
+            source_type=source_type,
+            status="success" if succeeded else "failed",
+            articles_collected=articles_collected,
+            failure_reason=_humanize_error(error) if error else None,
         )
     )
-    if stat_key and items_count:
-        result.stats[stat_key] = result.stats.get(stat_key, 0) + items_count
+    if stat_key and articles_collected:
+        result.stats[stat_key] = result.stats.get(stat_key, 0) + articles_collected
 
 
 def _cut(text: str | None, limit: int = config.MAX_ITEM_SUMMARY_CHARS) -> str | None:
@@ -288,9 +335,10 @@ def fetch_rss_feeds(result: ScrapeResult, seen: set[str], since: datetime) -> No
         added = _add_items(result, batch, seen)
         _record_source(
             result,
-            name=source_label,
+            source_name=name,
+            source_type="RSS",
             succeeded=bool(added),
-            items_count=len(added),
+            articles_collected=len(added),
             error=error if not added else None,
             stat_key=f"rss:{name}",
         )
@@ -334,9 +382,11 @@ def fetch_hf_trending_papers(result: ScrapeResult, seen: set[str], since: dateti
                 )
             )
         added = _add_items(result, batch, seen)
-        _record_source(result, name, bool(added), len(added), stat_key="hf_papers")
+        _record_source(
+            result, name, "API", bool(added), len(added), stat_key="hf_papers"
+        )
     except Exception as exc:  # noqa: BLE001
-        _record_source(result, name, False, 0, str(exc))
+        _record_source(result, name, "API", False, 0, str(exc))
 
 
 def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> None:
@@ -386,9 +436,10 @@ def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> 
     added = _add_items(result, batch, seen)
     _record_source(
         result,
-        name,
-        bool(added),
-        len(added),
+        source_name=name,
+        source_type="API",
+        succeeded=bool(added),
+        articles_collected=len(added),
         error="; ".join(errors) if not added and errors else None,
         stat_key="hacker_news",
     )
@@ -443,12 +494,12 @@ def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
                     )
                 )
             added = _add_items(result, batch, seen)
-            _record_source(result, name, bool(added), len(added), stat_key="arxiv")
+            _record_source(result, name, "API", bool(added), len(added), stat_key="arxiv")
             return
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
 
-    _record_source(result, name, False, 0, str(last_exc))
+    _record_source(result, name, "API", False, 0, str(last_exc))
 
 
 def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
@@ -477,9 +528,10 @@ def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
         added = _add_items(result, batch, seen)
         _record_source(
             result,
-            name,
-            bool(added),
-            len(added),
+            source_name=f"Reddit {sub}",
+            source_type="RSS",
+            succeeded=bool(added),
+            articles_collected=len(added),
             error=error if not added else None,
             stat_key=f"reddit:{sub}",
         )
@@ -537,9 +589,10 @@ def fetch_twitter_profiles(result: ScrapeResult, seen: set[str], since: datetime
         added = _add_items(result, batch, seen)
         _record_source(
             result,
-            name,
-            bool(added),
-            len(added),
+            source_name=display_name,
+            source_type="Social",
+            succeeded=bool(added),
+            articles_collected=len(added),
             error=error if not added else None,
             stat_key=f"twitter:{username}",
         )

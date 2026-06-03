@@ -48,12 +48,88 @@ class SourceRef:
 
 
 @dataclass
+class SourceCoverageDetail:
+    source_name: str
+    source_type: str
+    status: str
+    articles_collected: int
+    failure_reason: str | None = None
+
+
+@dataclass
 class ScrapeStatusSummary:
-    sources_scanned: int
-    sources_succeeded: int
-    sources_failed: int
-    coverage_pct: int
-    failed_sources: list[dict[str, str]] = field(default_factory=list)
+    total_sources: int
+    successful_sources: int
+    failed_source_count: int
+    coverage_percentage: int
+    total_articles_collected: int
+    source_details: list[SourceCoverageDetail] = field(default_factory=list)
+    failed_source_list: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def sources_scanned(self) -> int:
+        return self.total_sources
+
+    @property
+    def sources_succeeded(self) -> int:
+        return self.successful_sources
+
+    @property
+    def sources_failed(self) -> int:
+        return self.failed_source_count
+
+    @property
+    def coverage_pct(self) -> int:
+        return self.coverage_percentage
+
+    def reliability_label(self, hebrew: bool = True) -> str:
+        pct = self.coverage_percentage
+        if hebrew:
+            if pct >= 90:
+                return "🟢 כיסוי גבוה"
+            if pct >= 75:
+                return "🟡 כיסוי בינוני"
+            return "🔴 כיסוי נמוך"
+        if pct >= 90:
+            return "🟢 High coverage"
+        if pct >= 75:
+            return "🟡 Medium coverage"
+        return "🔴 Low coverage"
+
+    def completeness_text(self, hebrew: bool = True) -> str:
+        pct = self.coverage_percentage
+        if hebrew:
+            if pct >= 90:
+                return (
+                    "הדוח מבוסס על רוב המקורות המתוכננים ולכן צפוי לשקף באופן מלא כמעט "
+                    "את ההתפתחויות המרכזיות בשבוע האחרון."
+                )
+            if pct >= 75:
+                return (
+                    "מרבית המקורות נסרקו בהצלחה ולכן הדוח צפוי לשקף את רוב ההתפתחויות המרכזיות, "
+                    "אך ייתכן שחלק מהעדכונים לא נכללו."
+                )
+            return (
+                "מספר מקורות מרכזיים לא היו זמינים בזמן יצירת הדוח ולכן ייתכן "
+                "שחלק מהעדכונים המשמעותיים לא נכללו."
+            )
+        if pct >= 90:
+            return "The report reflects nearly all major developments from the past week."
+        if pct >= 75:
+            return "Most sources succeeded; some updates may be missing."
+        return "Several key sources were unavailable; significant updates may be missing."
+
+    def transparency_text(self, hebrew: bool = True) -> str:
+        if hebrew:
+            return (
+                f"הדוח נוצר מתוך {self.total_articles_collected} פריטים שנאספו "
+                f"מ-{self.successful_sources} מקורות פעילים לאחר סינון כפילויות, "
+                "איחוד ידיעות דומות ותיעדוף לפי השפעה עסקית, מוצרית וטכנולוגית."
+            )
+        return (
+            f"This report was built from {self.total_articles_collected} items collected "
+            f"across {self.successful_sources} active sources after deduplication and prioritization."
+        )
 
 
 @dataclass
@@ -229,12 +305,25 @@ def _parse_sources(items: Any) -> list[SourceRef]:
 
 
 def _build_scrape_status(scrape: ScrapeResult) -> ScrapeStatusSummary:
+    details = [
+        SourceCoverageDetail(
+            source_name=s.source_name,
+            source_type=s.source_type,
+            status=s.status,
+            articles_collected=s.articles_collected,
+            failure_reason=s.failure_reason,
+        )
+        for s in scrape.sources
+    ]
+    failed_list = scrape.failed_sources
     return ScrapeStatusSummary(
-        sources_scanned=scrape.sources_scanned,
-        sources_succeeded=scrape.sources_succeeded,
-        sources_failed=scrape.sources_failed,
-        coverage_pct=scrape.coverage_pct,
-        failed_sources=scrape.failed_sources,
+        total_sources=scrape.sources_scanned,
+        successful_sources=scrape.sources_succeeded,
+        failed_source_count=scrape.sources_failed,
+        coverage_percentage=scrape.coverage_pct,
+        total_articles_collected=scrape.total_articles_collected,
+        source_details=details,
+        failed_source_list=failed_list,
     )
 
 

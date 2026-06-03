@@ -38,7 +38,7 @@ def main() -> int:
     log.info(
         "Report generated for %s (coverage %d%%)",
         report.report_date,
-        report.scrape_status.coverage_pct,
+        report.scrape_status.coverage_percentage,
     )
 
     send_email(report)

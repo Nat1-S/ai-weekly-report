@@ -37,11 +37,14 @@ def _labels() -> dict[str, str]:
             "pm_takeaways": "מסקנות ל-PM",
             "sources": "מקורות מרכזיים",
             "items_collected": "פריטים שנאספו",
+            "coverage_quality": "מקורות ואיכות הכיסוי",
             "sources_scanned": "מקורות שנסרקו",
             "sources_succeeded": "מקורות שהצליחו",
             "sources_failed": "מקורות שנכשלו",
-            "coverage": "ציון כיסוי",
-            "admin_details": "פרטי סריקה (מנהל)",
+            "coverage_pct_label": "אחוז כיסוי",
+            "total_items_week": "סה\"כ פריטים שנאספו השבוע",
+            "failed_sources_title": "מקורות שנכשלו",
+            "completeness_title": "הערכת שלמות המידע",
             "footer": "דוח אוטומטי · GitHub Actions",
             "why_matters": "למה זה חשוב",
             "relevance": "רלוונטיות",
@@ -56,11 +59,14 @@ def _labels() -> dict[str, str]:
         "pm_takeaways": "PM Takeaways",
         "sources": "Key Sources",
         "items_collected": "Items collected",
+        "coverage_quality": "Sources & Coverage Quality",
         "sources_scanned": "Sources scanned",
         "sources_succeeded": "Sources succeeded",
         "sources_failed": "Sources failed",
-        "coverage": "Coverage score",
-        "admin_details": "Scrape details (admin)",
+        "coverage_pct_label": "Coverage",
+        "total_items_week": "Total items collected this week",
+        "failed_sources_title": "Failed sources",
+        "completeness_title": "Information completeness",
         "footer": "Automated report · GitHub Actions",
         "why_matters": "Why it matters",
         "relevance": "Relevance",
@@ -140,31 +146,41 @@ def _render_sources(report: ReportContent, labels: dict[str, str]) -> str:
     """
 
 
-def _render_coverage(report: ReportContent, labels: dict[str, str]) -> str:
+def _render_coverage_quality_section(report: ReportContent, labels: dict[str, str]) -> str:
+    he = _is_hebrew_report()
     s = report.scrape_status
-    return f"""
-    <div class="coverage">
-      <span>{_esc(labels["sources_scanned"])}: <strong>{s.sources_scanned}</strong></span>
-      <span>{_esc(labels["sources_succeeded"])}: <strong>{s.sources_succeeded}</strong></span>
-      <span>{_esc(labels["sources_failed"])}: <strong>{s.sources_failed}</strong></span>
-      <span>{_esc(labels["coverage"])}: <strong>{s.coverage_pct}%</strong></span>
-    </div>
-    """
+    reliability = s.reliability_label(hebrew=he)
+    completeness = s.completeness_text(hebrew=he)
+    transparency = s.transparency_text(hebrew=he)
 
+    failed_block = ""
+    if s.failed_source_list:
+        failed_items = "".join(
+            f"<li>{_esc(f['name'])} — {_esc(f['error'])}</li>"
+            for f in s.failed_source_list[:12]
+        )
+        failed_block = f"""
+        <div class="cq-failed">
+          <strong>{_esc(labels["failed_sources_title"])}:</strong>
+          <ul>{failed_items}</ul>
+        </div>
+        """
 
-def _render_admin_details(report: ReportContent, labels: dict[str, str]) -> str:
-    failed = report.scrape_status.failed_sources
-    if not failed:
-        return ""
-    items = "".join(
-        f"<li><strong>{_esc(f['name'])}</strong>: {_esc(f['error'])}</li>"
-        for f in failed[:12]
-    )
     return f"""
-    <details class="admin">
-      <summary>{_esc(labels["admin_details"])}</summary>
-      <ul>{items}</ul>
-    </details>
+    <section class="coverage-quality">
+      <h2>{_esc(labels["coverage_quality"])}</h2>
+      <div class="cq-stats">
+        <div>{_esc(labels["sources_scanned"])}: <strong>{s.total_sources}</strong></div>
+        <div>{_esc(labels["sources_succeeded"])}: <strong>{s.successful_sources}</strong></div>
+        <div>{_esc(labels["sources_failed"])}: <strong>{s.failed_source_count}</strong></div>
+        <div>{_esc(labels["coverage_pct_label"])}: <strong>{s.coverage_percentage}%</strong></div>
+        <div>{_esc(labels["total_items_week"])}: <strong>{s.total_articles_collected}</strong></div>
+      </div>
+      <p class="cq-reliability">{_esc(reliability)}</p>
+      {failed_block}
+      <p class="cq-completeness"><strong>{_esc(labels["completeness_title"])}:</strong> {_esc(completeness)}</p>
+      <p class="cq-transparency">{_esc(transparency)}</p>
+    </section>
     """
 
 
@@ -212,10 +228,25 @@ def build_plain_text_email(report: ReportContent) -> str:
     lines.extend(
         [
             "",
-            f"{labels['sources_scanned']}: {s.sources_scanned}",
-            f"{labels['sources_succeeded']}: {s.sources_succeeded}",
-            f"{labels['sources_failed']}: {s.sources_failed}",
-            f"{labels['coverage']}: {s.coverage_pct}%",
+            labels["coverage_quality"].upper(),
+            f"{labels['sources_scanned']}: {s.total_sources}",
+            f"{labels['sources_succeeded']}: {s.successful_sources}",
+            f"{labels['sources_failed']}: {s.failed_source_count}",
+            f"{labels['coverage_pct_label']}: {s.coverage_percentage}%",
+            f"{labels['total_items_week']}: {s.total_articles_collected}",
+            s.reliability_label(hebrew=_is_hebrew_report()),
+        ]
+    )
+    if s.failed_source_list:
+        lines.append("")
+        lines.append(f"{labels['failed_sources_title']}:")
+        for f in s.failed_source_list:
+            lines.append(f"• {f['name']} — {f['error']}")
+    lines.extend(
+        [
+            "",
+            f"{labels['completeness_title']}: {s.completeness_text(hebrew=_is_hebrew_report())}",
+            s.transparency_text(hebrew=_is_hebrew_report()),
         ]
     )
     return "\n".join(lines).strip()
@@ -299,19 +330,49 @@ def build_html_email(report: ReportContent) -> str:
       color: #64748b;
       font-size: 0.92em;
     }}
-    .coverage {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px 18px;
-      background: #f1f5f9;
-      border-radius: 8px;
-      padding: 12px 14px;
-      margin: 18px 0 8px;
+    .coverage-quality {{
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-top: 24px;
       font-size: 0.875rem;
       color: #475569;
     }}
-    .coverage span strong {{
+    .coverage-quality h2 {{
+      font-size: 0.95rem;
+      margin-top: 0;
+      border-bottom: 1px solid #e2e8f0;
+    }}
+    .cq-stats {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 16px;
+      margin: 12px 0;
+    }}
+    .cq-stats strong {{
       color: #0f3460;
+    }}
+    .cq-reliability {{
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin: 10px 0;
+      color: #1e293b;
+    }}
+    .cq-failed {{
+      margin: 10px 0;
+      font-size: 0.82rem;
+    }}
+    .cq-failed ul {{
+      margin-top: 6px;
+      font-size: 0.82rem;
+      color: #64748b;
+    }}
+    .cq-completeness, .cq-transparency {{
+      margin: 8px 0 0;
+      font-size: 0.82rem;
+      line-height: 1.55;
+      color: #64748b;
     }}
     .takeaway {{
       background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
@@ -321,19 +382,6 @@ def build_html_email(report: ReportContent) -> str:
     .sources a {{
       color: #2563eb;
       text-decoration: none;
-    }}
-    .admin {{
-      margin-top: 18px;
-      font-size: 0.78rem;
-      color: #64748b;
-    }}
-    .admin summary {{
-      cursor: pointer;
-      color: #94a3b8;
-    }}
-    .admin ul {{
-      margin-top: 8px;
-      font-size: 0.78rem;
     }}
     .empty {{
       color: #94a3b8;
@@ -352,8 +400,7 @@ def build_html_email(report: ReportContent) -> str:
     <p class="meta">{_esc(report.report_date)} · {_esc(labels["items_collected"])}: {report.items_collected}</p>
     {''.join(sections)}
     {_render_sources(report, labels)}
-    {_render_coverage(report, labels)}
-    {_render_admin_details(report, labels)}
+    {_render_coverage_quality_section(report, labels)}
   </div>
   <footer>{_esc(labels["footer"])}</footer>
 </body>
