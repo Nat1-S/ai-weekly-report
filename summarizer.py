@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from anthropic import Anthropic
@@ -135,6 +135,9 @@ class ScrapeStatusSummary:
 @dataclass
 class ReportContent:
     report_date: str
+    period_display: str
+    period_start: str
+    period_end: str
     executive_summary: list[str]
     models_research: list[ResearchItem]
     products_tools: list[ProductItem]
@@ -149,9 +152,10 @@ class ReportContent:
 SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise weekly intelligence brief for a product manager.
 Use ONLY the provided source items. Do not invent news.
 Write in clear Hebrew when requested, but preserve English product/model names as-is (e.g. GPT-4, Claude, OpenAI).
-Keep the full report concise — roughly 2 printed pages when rendered.
+Keep summaries short. Target reading time: 5 minutes.
 Return valid JSON only. No markdown. No code fences. No prose outside JSON.
-Each list section should have 3-5 focused items maximum."""
+Limits: models_research max 3 items, products_tools max 5, business_market max 5, executive_summary 3-4 bullets, pm_takeaways 2-3 bullets.
+Put English product/company names in the title field; keep summary and impact fields in Hebrew when Hebrew is requested."""
 
 
 def _language_instruction() -> str:
@@ -194,8 +198,13 @@ Return JSON with exactly this schema:
 }}
 
 Rules:
-- executive_summary: 3-5 short bullets
-- pm_takeaways: 2-4 actionable bullets for a PM
+- executive_summary: 3-4 short bullets
+- models_research: maximum 3 items
+- products_tools: maximum 5 items
+- business_market: maximum 5 items
+- pm_takeaways: 2-3 actionable bullets for a PM
+- title fields: use English product/company names where appropriate
+- summary/why_it_matters/relevance: Hebrew when Hebrew is requested
 - sources: up to 8 most important cited sources with real URLs from the input
 - Do NOT include scrape_status in your response
 """
@@ -293,6 +302,19 @@ def _parse_technical(value: Any) -> TechnicalCorner | None:
     return TechnicalCorner(title=title or "Technical Corner", explanation=explanation)
 
 
+def _format_period(now: datetime) -> tuple[str, str, str, str]:
+    """Return (report_date, period_display, period_start, period_end)."""
+    end = now.date()
+    start = end - timedelta(days=config.LOOKBACK_DAYS - 1)
+    he = config.REPORT_LANGUAGE.lower() in ("he", "hebrew", "עברית")
+    if he:
+        display = f"{start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}"
+    else:
+        display = f"{start.strftime('%d %b %Y')} - {end.strftime('%d %b %Y')}"
+    report_date = now.strftime("%d %B %Y")
+    return report_date, display, start.isoformat(), end.isoformat()
+
+
 def _parse_sources(items: Any) -> list[SourceRef]:
     out: list[SourceRef] = []
     if not isinstance(items, list):
@@ -356,16 +378,21 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         data = _extract_json(raw)
     except (json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError(f"Failed to parse Claude JSON response: {exc}") from exc
-    report_date = datetime.now(config.LOCAL_TZ).strftime("%d %B %Y")
+    report_date, period_display, period_start, period_end = _format_period(
+        datetime.now(config.LOCAL_TZ)
+    )
 
     return ReportContent(
         report_date=report_date,
+        period_display=period_display,
+        period_start=period_start,
+        period_end=period_end,
         executive_summary=_as_list(data.get("executive_summary")),
-        models_research=_parse_research(data.get("models_research")),
-        products_tools=_parse_products(data.get("products_tools")),
-        business_market=_parse_business(data.get("business_market")),
+        models_research=_parse_research(data.get("models_research"))[:3],
+        products_tools=_parse_products(data.get("products_tools"))[:5],
+        business_market=_parse_business(data.get("business_market"))[:5],
         technical_corner=_parse_technical(data.get("technical_corner")),
-        pm_takeaways=_as_list(data.get("pm_takeaways")),
+        pm_takeaways=_as_list(data.get("pm_takeaways"))[:3],
         sources=_parse_sources(data.get("sources")),
         scrape_status=_build_scrape_status(scrape),
         items_collected=len(scrape.items),
