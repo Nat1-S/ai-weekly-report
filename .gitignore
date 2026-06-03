@@ -7,3 +7,4 @@ venv/
 .DS_Store
 report_*.html
 raw_items.json
+.cache/

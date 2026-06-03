@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import logging
 import re
-import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -17,6 +17,9 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 import config
+from fetch_client import get_http_client
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -136,12 +139,6 @@ def _humanize_error(msg: str | None) -> str:
     return text or "Unknown error"
 
 
-def _session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({"User-Agent": config.USER_AGENT})
-    return s
-
-
 def _record_source(
     result: ScrapeResult,
     source_name: str,
@@ -162,6 +159,13 @@ def _record_source(
     )
     if stat_key and articles_collected:
         result.stats[stat_key] = result.stats.get(stat_key, 0) + articles_collected
+
+
+def _snippet_from_html(text: str | None) -> str | None:
+    if not text:
+        return None
+    plain = BeautifulSoup(str(text), "html.parser").get_text(" ", strip=True)
+    return _cut(plain)
 
 
 def _cut(text: str | None, limit: int = config.MAX_ITEM_SUMMARY_CHARS) -> str | None:
@@ -241,9 +245,8 @@ def _items_from_feed_entries(
             continue
         link = getattr(entry, "link", "") or ""
         title = getattr(entry, "title", "").strip() or "(no title)"
-        summary = _cut(
-            getattr(entry, "summary", None) or getattr(entry, "description", None)
-        )
+        raw_summary = getattr(entry, "summary", None) or getattr(entry, "description", None)
+        summary = _snippet_from_html(raw_summary)
         batch.append(
             NewsItem(
                 title=title,
@@ -257,13 +260,14 @@ def _items_from_feed_entries(
     return batch
 
 
-def _scrape_html_fallback(
-    session: requests.Session,
+def _scrape_html_listing_only(
     page_url: str,
     source_name: str,
     since: datetime,
 ) -> list[NewsItem]:
-    resp = session.get(page_url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
+    """Parse a single listing page for title/url only (no per-article fetches)."""
+    client = get_http_client()
+    resp = client.fetch(page_url, source_name, timeout=config.REQUEST_TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     seen_urls: set[str] = set()
@@ -307,14 +311,15 @@ def _scrape_html_fallback(
 
 
 def fetch_rss_feeds(result: ScrapeResult, seen: set[str], since: datetime) -> None:
-    session = _session()
+    client = get_http_client()
     for name, url in config.RSS_FEEDS.items():
         source_label = f"RSS: {name}"
         batch: list[NewsItem] = []
         error: str | None = None
         try:
-            resp = session.get(url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
-            resp.raise_for_status()
+            resp = client.fetch(url, source_label, timeout=config.REQUEST_TIMEOUT)
+            if resp.status_code >= 400:
+                resp.raise_for_status()
             entries = _entries_from_feed(resp.content)
             if entries:
                 batch = _items_from_feed_entries(entries, source_label, since)
@@ -325,8 +330,8 @@ def fetch_rss_feeds(result: ScrapeResult, seen: set[str], since: datetime) -> No
 
         if not batch and name in config.RSS_HTML_FALLBACKS:
             try:
-                batch = _scrape_html_fallback(
-                    session, config.RSS_HTML_FALLBACKS[name], source_label, since
+                batch = _scrape_html_listing_only(
+                    config.RSS_HTML_FALLBACKS[name], source_label, since
                 )
                 if batch:
                     error = None
@@ -348,11 +353,11 @@ def fetch_rss_feeds(result: ScrapeResult, seen: set[str], since: datetime) -> No
 def fetch_hf_trending_papers(result: ScrapeResult, seen: set[str], since: datetime) -> None:
     name = "Hugging Face Papers Trending"
     try:
-        resp = _session().get(
-            config.HF_DAILY_PAPERS_URL,
-            params={"limit": 25, "sort": "trending"},
-            timeout=config.REQUEST_TIMEOUT,
+        client = get_http_client()
+        url = (
+            f"{config.HF_DAILY_PAPERS_URL}?limit=25&sort=trending"
         )
+        resp = client.fetch(url, name, timeout=config.REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         batch: list[NewsItem] = []
@@ -395,20 +400,21 @@ def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> 
     since_ts = int(since.timestamp())
     queries = ["AI", "LLM", "machine learning", "OpenAI", "Anthropic"]
     batch: list[NewsItem] = []
-    session = _session()
+    client = get_http_client()
     errors: list[str] = []
 
     for q in queries:
         try:
-            resp = session.get(
+            resp = client.fetch(
                 config.HN_ALGOLIA_URL,
+                f"{name} ({q})",
+                timeout=config.REQUEST_TIMEOUT,
                 params={
                     "query": q,
                     "tags": "story",
                     "numericFilters": f"created_at_i>{since_ts}",
                     "hitsPerPage": 10,
                 },
-                timeout=config.REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             for hit in resp.json().get("hits", []):
@@ -455,17 +461,16 @@ def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
         "sortOrder": "descending",
         "max_results": 20,
     }
-    session = _session()
+    client = get_http_client()
     last_exc: Exception | None = None
 
-    for attempt in range(4):
+    for attempt in range(2):
         try:
-            if attempt:
-                time.sleep(2**attempt)
-            resp = session.get(
+            resp = client.fetch(
                 config.ARXIV_API_URL,
-                params=params,
+                name,
                 timeout=config.ARXIV_TIMEOUT,
+                params=params,
             )
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
@@ -497,15 +502,19 @@ def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
             added = _add_items(result, batch, seen)
             _record_source(result, name, "API", bool(added), len(added), stat_key="arxiv")
             return
+        except requests.Timeout as exc:
+            last_exc = exc
+            client.record_retry()
+            log.warning("ArXiv timeout (attempt %d/2): %s", attempt + 1, exc)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
+            break
 
     _record_source(result, name, "API", False, 0, str(last_exc))
 
 
 def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
-    session = _session()
-    session.headers.update({"User-Agent": config.REDDIT_USER_AGENT})
+    client = get_http_client()
 
     for sub in config.REDDIT_SUBREDDITS:
         name = f"Reddit r/{sub}"
@@ -513,10 +522,12 @@ def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
         batch: list[NewsItem] = []
         error: str | None = None
         try:
-            resp = session.get(
+            resp = client.fetch(
                 url,
-                params={"t": "week", "limit": 15},
+                name,
                 timeout=config.REQUEST_TIMEOUT,
+                params={"t": "week", "limit": 15},
+                extra_headers={"User-Agent": config.REDDIT_USER_AGENT},
             )
             if resp.status_code == 403:
                 raise requests.HTTPError("Blocked by Reddit (403)")
@@ -547,13 +558,10 @@ def fetch_twitter_profiles(result: ScrapeResult, seen: set[str], since: datetime
         for instance in config.NITTER_RSS_INSTANCES:
             feed_url = f"{instance.rstrip('/')}/{username}/rss"
             try:
-                resp = _session().get(
+                resp = get_http_client().fetch(
                     feed_url,
+                    name,
                     timeout=config.REQUEST_TIMEOUT,
-                    headers={
-                        "User-Agent": config.USER_AGENT,
-                        "Accept": "application/rss+xml, application/xml, text/xml",
-                    },
                 )
                 if resp.status_code != 200:
                     continue
@@ -566,7 +574,7 @@ def fetch_twitter_profiles(result: ScrapeResult, seen: set[str], since: datetime
                         continue
                     title = getattr(entry, "title", "").strip() or "(tweet)"
                     link = getattr(entry, "link", "") or ""
-                    summary = _cut(
+                    summary = _snippet_from_html(
                         getattr(entry, "summary", None) or getattr(entry, "description", None)
                     )
                     batch.append(
@@ -613,22 +621,35 @@ def _guess_category(title: str, body: str) -> str:
     return "general"
 
 
+def _safe_fetch(name: str, fn, result: ScrapeResult, seen: set[str], since: datetime) -> None:
+    try:
+        fn(result, seen, since)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Source collector crashed (%s): %s", name, exc)
+
+
 def scrape_all() -> ScrapeResult:
     since = _since_cutoff()
     result = ScrapeResult()
     seen: set[str] = set()
+    client = get_http_client()
 
-    fetch_rss_feeds(result, seen, since)
-    fetch_hf_trending_papers(result, seen, since)
-    fetch_hacker_news(result, seen, since)
-    fetch_arxiv(result, seen, since)
-    fetch_reddit(result, seen, since)
-    fetch_twitter_profiles(result, seen, since)
+    collectors = (
+        ("rss", fetch_rss_feeds),
+        ("hf_papers", fetch_hf_trending_papers),
+        ("hacker_news", fetch_hacker_news),
+        ("arxiv", fetch_arxiv),
+        ("reddit", fetch_reddit),
+        ("twitter", fetch_twitter_profiles),
+    )
+    for label, fn in collectors:
+        _safe_fetch(label, fn, result, seen, since)
 
     if len(result.items) > config.MAX_TOTAL_ITEMS:
         result.items.sort(key=lambda i: i.published or "", reverse=True)
         result.items = result.items[: config.MAX_TOTAL_ITEMS]
 
+    client.log_stats()
     return result
 
 
