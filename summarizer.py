@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -15,86 +15,113 @@ from scraper import ScrapeResult, items_to_prompt_blob
 
 
 @dataclass
+class ResearchItem:
+    title: str
+    summary: str
+    why_it_matters: str
+
+
+@dataclass
+class ProductItem:
+    title: str
+    summary: str
+    relevance: str
+
+
+@dataclass
+class BusinessItem:
+    title: str
+    summary: str
+    why_it_matters: str
+
+
+@dataclass
+class TechnicalCorner:
+    title: str
+    explanation: str
+
+
+@dataclass
+class SourceRef:
+    name: str
+    url: str
+
+
+@dataclass
+class ScrapeStatusSummary:
+    sources_scanned: int
+    sources_succeeded: int
+    sources_failed: int
+    coverage_pct: int
+    failed_sources: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class ReportContent:
     report_date: str
-    executive_summary: str
-    models_research: str
-    products_tools: str
-    business_market: str
-    technical_corner: str
-    key_takeaway: str
-    sources_used: int
-    scrape_errors: list[str]
-
-    def sections(self) -> list[tuple[str, str, str]]:
-        """Return (id, title, html_content) for email template."""
-        if config.REPORT_LANGUAGE.lower() in ("he", "hebrew", "עברית"):
-            titles = {
-                "executive": "סיכום מנהלים",
-                "research": "מודלים ומחקר",
-                "products": "מוצרים וכלים",
-                "business": "עסקים ושוק",
-                "technical": "פינה טכנית",
-                "takeaway": "מסקנה מרכזית",
-            }
-        else:
-            titles = {
-                "executive": "Executive Summary",
-                "research": "Models & Research",
-                "products": "Products & Tools",
-                "business": "Business & Market",
-                "technical": "Technical Corner",
-                "takeaway": "Key Takeaway",
-            }
-        return [
-            ("executive", titles["executive"], self.executive_summary),
-            ("research", titles["research"], self.models_research),
-            ("products", titles["products"], self.products_tools),
-            ("business", titles["business"], self.business_market),
-            ("technical", titles["technical"], self.technical_corner),
-            ("takeaway", titles["takeaway"], self.key_takeaway),
-        ]
+    executive_summary: list[str]
+    models_research: list[ResearchItem]
+    products_tools: list[ProductItem]
+    business_market: list[BusinessItem]
+    technical_corner: TechnicalCorner | None
+    pm_takeaways: list[str]
+    sources: list[SourceRef]
+    scrape_status: ScrapeStatusSummary
+    items_collected: int
 
 
-SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise weekly intelligence brief.
-Use ONLY the provided source items. Do not invent news. If a section lacks evidence, say so briefly.
-Write clearly for a technical executive audience. Prefer bullets where appropriate.
-The full report must fit roughly 2 printed pages when rendered as HTML (about 900-1100 words total).
-Allocate content roughly by section weight: Executive 20%, Models & Research 20%, Products & Tools 25%, Business & Market 25%, Technical Corner 5%, Key Takeaway 5%.
-Respond with valid JSON only — no markdown fences."""
+SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise weekly intelligence brief for a product manager.
+Use ONLY the provided source items. Do not invent news.
+Write in clear Hebrew when requested, but preserve English product/model names as-is (e.g. GPT-4, Claude, OpenAI).
+Keep the full report concise — roughly 2 printed pages when rendered.
+Return valid JSON only. No markdown. No code fences. No prose outside JSON.
+Each list section should have 3-5 focused items maximum."""
 
 
 def _language_instruction() -> str:
     if config.REPORT_LANGUAGE.lower() in ("he", "hebrew", "עברית"):
-        return "Write the entire report in Hebrew (עברית), including section titles in the JSON values."
-    return "Write the report in English."
+        return (
+            "Write all text fields in Hebrew (עברית). "
+            "Keep English names for products, companies, models, and APIs."
+        )
+    return "Write all text fields in English."
 
 
 def _build_user_prompt(scrape: ScrapeResult) -> str:
     now = datetime.now(config.LOCAL_TZ)
     period_end = now.strftime("%Y-%m-%d")
     blob = items_to_prompt_blob(scrape.items)
-    errors = "\n".join(scrape.errors) if scrape.errors else "None"
 
     return f"""{_language_instruction()}
 
 Report period: last {config.LOOKBACK_DAYS} days (ending {period_end}).
 Collected items: {len(scrape.items)}
-Scrape warnings:
-{errors}
 
 SOURCE ITEMS:
 {blob}
 
-Return JSON with exactly these keys:
+Return JSON with exactly this schema:
 {{
-  "executive_summary": "string — high-level week in AI",
-  "models_research": "string — papers, models, benchmarks, research breakthroughs",
-  "products_tools": "string — launches, APIs, open-source tools, products",
-  "business_market": "string — funding, policy, market moves, partnerships",
-  "technical_corner": "string — one sharp technical insight or tip",
-  "key_takeaway": "string — single most important action-oriented takeaway"
+  "executive_summary": ["bullet 1", "bullet 2"],
+  "models_research": [
+    {{"title": "...", "summary": "...", "why_it_matters": "..."}}
+  ],
+  "products_tools": [
+    {{"title": "...", "summary": "...", "relevance": "..."}}
+  ],
+  "business_market": [
+    {{"title": "...", "summary": "...", "why_it_matters": "..."}}
+  ],
+  "technical_corner": {{"title": "...", "explanation": "..."}},
+  "pm_takeaways": ["actionable takeaway 1", "actionable takeaway 2"],
+  "sources": [{{"name": "...", "url": "..."}}]
 }}
+
+Rules:
+- executive_summary: 3-5 short bullets
+- pm_takeaways: 2-4 actionable bullets for a PM
+- sources: up to 8 most important cited sources with real URLs from the input
+- Do NOT include scrape_status in your response
 """
 
 
@@ -107,6 +134,108 @@ def _extract_json(text: str) -> dict[str, Any]:
         if match:
             return json.loads(match.group())
         raise
+
+
+def _as_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _parse_research(items: Any) -> list[ResearchItem]:
+    out: list[ResearchItem] = []
+    if not isinstance(items, list):
+        return out
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).strip()
+        if not title:
+            continue
+        out.append(
+            ResearchItem(
+                title=title,
+                summary=str(row.get("summary", "")).strip(),
+                why_it_matters=str(row.get("why_it_matters", "")).strip(),
+            )
+        )
+    return out
+
+
+def _parse_products(items: Any) -> list[ProductItem]:
+    out: list[ProductItem] = []
+    if not isinstance(items, list):
+        return out
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).strip()
+        if not title:
+            continue
+        out.append(
+            ProductItem(
+                title=title,
+                summary=str(row.get("summary", "")).strip(),
+                relevance=str(row.get("relevance", "")).strip(),
+            )
+        )
+    return out
+
+
+def _parse_business(items: Any) -> list[BusinessItem]:
+    out: list[BusinessItem] = []
+    if not isinstance(items, list):
+        return out
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).strip()
+        if not title:
+            continue
+        out.append(
+            BusinessItem(
+                title=title,
+                summary=str(row.get("summary", "")).strip(),
+                why_it_matters=str(row.get("why_it_matters", "")).strip(),
+            )
+        )
+    return out
+
+
+def _parse_technical(value: Any) -> TechnicalCorner | None:
+    if not isinstance(value, dict):
+        return None
+    title = str(value.get("title", "")).strip()
+    explanation = str(value.get("explanation", "")).strip()
+    if not title and not explanation:
+        return None
+    return TechnicalCorner(title=title or "Technical Corner", explanation=explanation)
+
+
+def _parse_sources(items: Any) -> list[SourceRef]:
+    out: list[SourceRef] = []
+    if not isinstance(items, list):
+        return out
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        url = str(row.get("url", "")).strip()
+        if name and url:
+            out.append(SourceRef(name=name, url=url))
+    return out
+
+
+def _build_scrape_status(scrape: ScrapeResult) -> ScrapeStatusSummary:
+    return ScrapeStatusSummary(
+        sources_scanned=scrape.sources_scanned,
+        sources_succeeded=scrape.sources_succeeded,
+        sources_failed=scrape.sources_failed,
+        coverage_pct=scrape.coverage_pct,
+        failed_sources=scrape.failed_sources,
+    )
 
 
 def summarize(scrape: ScrapeResult) -> ReportContent:
@@ -131,12 +260,13 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
 
     return ReportContent(
         report_date=report_date,
-        executive_summary=data.get("executive_summary", "").strip(),
-        models_research=data.get("models_research", "").strip(),
-        products_tools=data.get("products_tools", "").strip(),
-        business_market=data.get("business_market", "").strip(),
-        technical_corner=data.get("technical_corner", "").strip(),
-        key_takeaway=data.get("key_takeaway", "").strip(),
-        sources_used=len(scrape.items),
-        scrape_errors=scrape.errors,
+        executive_summary=_as_list(data.get("executive_summary")),
+        models_research=_parse_research(data.get("models_research")),
+        products_tools=_parse_products(data.get("products_tools")),
+        business_market=_parse_business(data.get("business_market")),
+        technical_corner=_parse_technical(data.get("technical_corner")),
+        pm_takeaways=_as_list(data.get("pm_takeaways")),
+        sources=_parse_sources(data.get("sources")),
+        scrape_status=_build_scrape_status(scrape),
+        items_collected=len(scrape.items),
     )

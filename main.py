@@ -26,7 +26,7 @@ def main() -> int:
     for source, count in sorted(scrape.stats.items()):
         log.info("  %s: %d", source, count)
     if scrape.errors:
-        log.warning("%d scrape warnings", len(scrape.errors))
+        log.warning("%d sources failed", scrape.sources_failed)
         for err in scrape.errors:
             log.warning("  %s", err)
 
@@ -35,7 +35,11 @@ def main() -> int:
         return 1
 
     report = summarize(scrape)
-    log.info("Report generated for %s", report.report_date)
+    log.info(
+        "Report generated for %s (coverage %d%%)",
+        report.report_date,
+        report.scrape_status.coverage_pct,
+    )
 
     send_email(report)
     log.info("HTML email sent to %s", __import__("config").EMAIL_RECIPIENT)

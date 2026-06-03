@@ -9,13 +9,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urljoin
+
 import feedparser
 import requests
+from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 import config
-
-ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
 @dataclass
@@ -36,16 +37,83 @@ class NewsItem:
 
 
 @dataclass
+class SourceResult:
+    name: str
+    succeeded: bool
+    items_count: int = 0
+    error: str | None = None
+
+
+@dataclass
 class ScrapeResult:
     items: list[NewsItem] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    sources: list[SourceResult] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def sources_scanned(self) -> int:
+        return len(self.sources)
+
+    @property
+    def sources_succeeded(self) -> int:
+        return sum(1 for s in self.sources if s.succeeded)
+
+    @property
+    def sources_failed(self) -> int:
+        return sum(1 for s in self.sources if not s.succeeded)
+
+    @property
+    def coverage_pct(self) -> int:
+        if not self.sources_scanned:
+            return 0
+        return round(100 * self.sources_succeeded / self.sources_scanned)
+
+    @property
+    def failed_sources(self) -> list[dict[str, str]]:
+        return [
+            {"name": s.name, "error": _short_error(s.error or "Unknown error")}
+            for s in self.sources
+            if not s.succeeded
+        ]
+
+    # Backward-compatible alias for logging
+    @property
+    def errors(self) -> list[str]:
+        return [f"{s.name}: {s.error}" for s in self.sources if not s.succeeded and s.error]
+
+
+def _short_error(msg: str, max_len: int = 120) -> str:
+    msg = re.sub(r"https?://\S+", "[url]", msg)
+    msg = re.sub(r"\s+", " ", msg).strip()
+    if len(msg) <= max_len:
+        return msg
+    return msg[: max_len - 3] + "..."
 
 
 def _session() -> requests.Session:
     s = requests.Session()
     s.headers.update({"User-Agent": config.USER_AGENT})
     return s
+
+
+def _record_source(
+    result: ScrapeResult,
+    name: str,
+    succeeded: bool,
+    items_count: int = 0,
+    error: str | None = None,
+    stat_key: str | None = None,
+) -> None:
+    result.sources.append(
+        SourceResult(
+            name=name,
+            succeeded=succeeded,
+            items_count=items_count,
+            error=_short_error(error) if error else None,
+        )
+    )
+    if stat_key and items_count:
+        result.stats[stat_key] = result.stats.get(stat_key, 0) + items_count
 
 
 def _cut(text: str | None, limit: int = config.MAX_ITEM_SUMMARY_CHARS) -> str | None:
@@ -92,60 +160,144 @@ def _add_items(
     result: ScrapeResult,
     items: list[NewsItem],
     seen: set[str],
-    source_key: str,
-) -> None:
-    added = 0
+) -> list[NewsItem]:
+    added: list[NewsItem] = []
     for item in items[: config.MAX_ITEMS_PER_SOURCE]:
         k = item.key()
         if k in seen:
             continue
         seen.add(k)
         result.items.append(item)
-        added += 1
-    result.stats[source_key] = result.stats.get(source_key, 0) + added
+        added.append(item)
+    return added
+
+
+def _entries_from_feed(content: bytes) -> list[Any]:
+    parsed = feedparser.parse(content)
+    if not parsed.entries:
+        return []
+    return list(parsed.entries)
+
+
+def _items_from_feed_entries(
+    entries: list[Any],
+    source_name: str,
+    since: datetime,
+) -> list[NewsItem]:
+    batch: list[NewsItem] = []
+    for entry in entries:
+        published = _parse_date(
+            getattr(entry, "published", None) or getattr(entry, "updated", None)
+        )
+        if not _within_lookback(published, since):
+            continue
+        link = getattr(entry, "link", "") or ""
+        title = getattr(entry, "title", "").strip() or "(no title)"
+        summary = _cut(
+            getattr(entry, "summary", None) or getattr(entry, "description", None)
+        )
+        batch.append(
+            NewsItem(
+                title=title,
+                url=link,
+                source=source_name,
+                published=published.isoformat() if published else None,
+                summary=summary,
+                category=_guess_category(title, summary or ""),
+            )
+        )
+    return batch
+
+
+def _scrape_html_fallback(
+    session: requests.Session,
+    page_url: str,
+    source_name: str,
+    since: datetime,
+) -> list[NewsItem]:
+    resp = session.get(page_url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    seen_urls: set[str] = set()
+    batch: list[NewsItem] = []
+
+    selectors = [
+        "article h2 a",
+        "article h3 a",
+        "article a",
+        ".post-title a",
+        "h2 a",
+        "h3 a",
+    ]
+    for selector in selectors:
+        for link in soup.select(selector):
+            href = link.get("href") or ""
+            title = link.get_text(" ", strip=True)
+            if not href or not title or len(title) < 12:
+                continue
+            url = urljoin(page_url, href)
+            if url in seen_urls or not url.startswith("http"):
+                continue
+            if any(skip in url for skip in ("/tag/", "/author/", "/category/", "#", "javascript:")):
+                continue
+            seen_urls.add(url)
+            batch.append(
+                NewsItem(
+                    title=title,
+                    url=url,
+                    source=f"{source_name} (HTML)",
+                    published=None,
+                    summary=None,
+                    category=_guess_category(title, ""),
+                )
+            )
+            if len(batch) >= config.MAX_ITEMS_PER_SOURCE:
+                return batch
+        if batch:
+            return batch
+    return batch
 
 
 def fetch_rss_feeds(result: ScrapeResult, seen: set[str], since: datetime) -> None:
     session = _session()
     for name, url in config.RSS_FEEDS.items():
+        source_label = f"RSS: {name}"
+        batch: list[NewsItem] = []
+        error: str | None = None
         try:
             resp = session.get(url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
             resp.raise_for_status()
-            parsed = feedparser.parse(resp.content)
-            if getattr(parsed, "bozo", False) and not parsed.entries:
-                result.errors.append(f"RSS {name}: parse error")
-                continue
-
-            batch: list[NewsItem] = []
-            for entry in parsed.entries:
-                published = _parse_date(
-                    getattr(entry, "published", None)
-                    or getattr(entry, "updated", None)
-                )
-                if not _within_lookback(published, since):
-                    continue
-                link = getattr(entry, "link", "") or ""
-                title = getattr(entry, "title", "").strip() or "(no title)"
-                summary = _cut(
-                    getattr(entry, "summary", None) or getattr(entry, "description", None)
-                )
-                batch.append(
-                    NewsItem(
-                        title=title,
-                        url=link,
-                        source=f"RSS: {name}",
-                        published=published.isoformat() if published else None,
-                        summary=summary,
-                        category=_guess_category(title, summary or ""),
-                    )
-                )
-            _add_items(result, batch, seen, f"rss:{name}")
+            entries = _entries_from_feed(resp.content)
+            if entries:
+                batch = _items_from_feed_entries(entries, source_label, since)
+            else:
+                error = "RSS parse error"
         except Exception as exc:  # noqa: BLE001
-            result.errors.append(f"RSS {name}: {exc}")
+            error = str(exc)
+
+        if not batch and name in config.RSS_HTML_FALLBACKS:
+            try:
+                batch = _scrape_html_fallback(
+                    session, config.RSS_HTML_FALLBACKS[name], source_label, since
+                )
+                if batch:
+                    error = None
+            except Exception as exc:  # noqa: BLE001
+                error = error or str(exc)
+
+        added = _add_items(result, batch, seen)
+        _record_source(
+            result,
+            name=source_label,
+            succeeded=bool(added),
+            items_count=len(added),
+            error=error if not added else None,
+            stat_key=f"rss:{name}",
+        )
 
 
 def fetch_hf_trending_papers(result: ScrapeResult, seen: set[str], since: datetime) -> None:
-    """Hugging Face daily papers sorted by trending (free API)."""
+    name = "Hugging Face Papers Trending"
     try:
         resp = _session().get(
             config.HF_DAILY_PAPERS_URL,
@@ -166,7 +318,6 @@ def fetch_hf_trending_papers(result: ScrapeResult, seen: set[str], since: dateti
                 row.get("publishedAt")
                 or paper.get("submittedOnDailyAt")
                 or paper.get("publishedAt")
-                or paper.get("published_at")
             )
             if not _within_lookback(published, since):
                 continue
@@ -175,24 +326,26 @@ def fetch_hf_trending_papers(result: ScrapeResult, seen: set[str], since: dateti
                 NewsItem(
                     title=title,
                     url=url,
-                    source="API: Hugging Face Papers Trending",
+                    source=f"API: {name}",
                     published=published.isoformat() if published else None,
                     summary=_cut(paper.get("summary") or paper.get("abstract")),
                     category="research",
                     score=int(upvotes) if upvotes is not None else None,
                 )
             )
-        _add_items(result, batch, seen, "hf_papers")
+        added = _add_items(result, batch, seen)
+        _record_source(result, name, bool(added), len(added), stat_key="hf_papers")
     except Exception as exc:  # noqa: BLE001
-        result.errors.append(f"Hugging Face Papers API: {exc}")
+        _record_source(result, name, False, 0, str(exc))
 
 
 def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> None:
-    """HN stories from the last week via Algolia (free)."""
+    name = "Hacker News"
     since_ts = int(since.timestamp())
-    queries = ["AI", "LLM", "machine learning", "OpenAI", "Anthropic", "Claude"]
+    queries = ["AI", "LLM", "machine learning", "OpenAI", "Anthropic"]
     batch: list[NewsItem] = []
     session = _session()
+    errors: list[str] = []
 
     for q in queries:
         try:
@@ -202,7 +355,7 @@ def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> 
                     "query": q,
                     "tags": "story",
                     "numericFilters": f"created_at_i>{since_ts}",
-                    "hitsPerPage": 15,
+                    "hitsPerPage": 10,
                 },
                 timeout=config.REQUEST_TIMEOUT,
             )
@@ -220,7 +373,7 @@ def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> 
                     NewsItem(
                         title=title,
                         url=url,
-                        source="API: Hacker News",
+                        source=f"API: {name}",
                         published=published,
                         summary=_cut(hit.get("story_text")),
                         category=_guess_category(title, ""),
@@ -228,12 +381,21 @@ def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> 
                     )
                 )
         except Exception as exc:  # noqa: BLE001
-            result.errors.append(f"Hacker News ({q}): {exc}")
+            errors.append(str(exc))
 
-    _add_items(result, batch, seen, "hacker_news")
+    added = _add_items(result, batch, seen)
+    _record_source(
+        result,
+        name,
+        bool(added),
+        len(added),
+        error="; ".join(errors) if not added and errors else None,
+        stat_key="hacker_news",
+    )
 
 
 def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
+    name = "ArXiv"
     cat_query = "+OR+".join(f"cat:{c}" for c in config.ARXIV_CATEGORIES)
     params = {
         "search_query": cat_query,
@@ -243,14 +405,15 @@ def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
     }
     session = _session()
     last_exc: Exception | None = None
-    for attempt in range(3):
+
+    for attempt in range(4):
         try:
             if attempt:
-                time.sleep(4 * attempt)
+                time.sleep(2**attempt)
             resp = session.get(
                 config.ARXIV_API_URL,
                 params=params,
-                timeout=config.REQUEST_TIMEOUT,
+                timeout=config.ARXIV_TIMEOUT,
             )
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
@@ -273,92 +436,83 @@ def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
                     NewsItem(
                         title=title,
                         url=url,
-                        source="API: ArXiv",
+                        source=f"API: {name}",
                         published=published_dt.isoformat() if published_dt else None,
                         summary=summary,
                         category="research",
                     )
                 )
-            _add_items(result, batch, seen, "arxiv")
+            added = _add_items(result, batch, seen)
+            _record_source(result, name, bool(added), len(added), stat_key="arxiv")
             return
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-    result.errors.append(f"ArXiv: {last_exc}")
+
+    _record_source(result, name, False, 0, str(last_exc))
 
 
 def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
-    """Reddit via public RSS (more reliable than JSON from CI runners)."""
     session = _session()
-    batch: list[NewsItem] = []
+    session.headers.update({"User-Agent": config.REDDIT_USER_AGENT})
+
     for sub in config.REDDIT_SUBREDDITS:
+        name = f"Reddit r/{sub}"
         url = f"{config.REDDIT_BASE}/r/{sub}/top/.rss"
+        batch: list[NewsItem] = []
+        error: str | None = None
         try:
             resp = session.get(
                 url,
                 params={"t": "week", "limit": 15},
                 timeout=config.REQUEST_TIMEOUT,
-                headers={"User-Agent": config.USER_AGENT},
             )
+            if resp.status_code == 403:
+                raise requests.HTTPError("Blocked by Reddit (403)")
             resp.raise_for_status()
-            parsed = feedparser.parse(resp.content)
-            for entry in parsed.entries:
-                title = getattr(entry, "title", "").strip()
-                link = getattr(entry, "link", "") or ""
-                published = _parse_date(
-                    getattr(entry, "published", None) or getattr(entry, "updated", None)
-                )
-                if not _within_lookback(published, since):
-                    continue
-                summary = _cut(
-                    getattr(entry, "summary", None) or getattr(entry, "description", None)
-                )
-                batch.append(
-                    NewsItem(
-                        title=title,
-                        url=link,
-                        source=f"Reddit r/{sub}",
-                        published=published.isoformat() if published else None,
-                        summary=summary,
-                        category=_guess_category(title, summary or ""),
-                    )
-                )
+            entries = _entries_from_feed(resp.content)
+            batch = _items_from_feed_entries(entries, name, since)
         except Exception as exc:  # noqa: BLE001
-            result.errors.append(f"Reddit r/{sub}: {exc}")
+            error = str(exc)
 
-    _add_items(result, batch, seen, "reddit")
+        added = _add_items(result, batch, seen)
+        _record_source(
+            result,
+            name,
+            bool(added),
+            len(added),
+            error=error if not added else None,
+            stat_key=f"reddit:{sub}",
+        )
 
 
 def fetch_twitter_profiles(result: ScrapeResult, seen: set[str], since: datetime) -> None:
-    """Public X profiles via Nitter-style RSS mirrors (best-effort, free)."""
-    session = _session()
-    batch: list[NewsItem] = []
-
     for display_name, username in config.TWITTER_PROFILES.items():
-        fetched = False
+        name = f"X: {display_name}"
+        batch: list[NewsItem] = []
+        error: str | None = None
+
         for instance in config.NITTER_RSS_INSTANCES:
             feed_url = f"{instance.rstrip('/')}/{username}/rss"
             try:
-                parsed = feedparser.parse(
+                resp = _session().get(
                     feed_url,
-                    agent=config.USER_AGENT,
-                    request_headers={
+                    timeout=config.REQUEST_TIMEOUT,
+                    headers={
                         "User-Agent": config.USER_AGENT,
                         "Accept": "application/rss+xml, application/xml, text/xml",
                     },
                 )
-                if not parsed.entries:
+                if resp.status_code != 200:
                     continue
-                for entry in parsed.entries[:10]:
+                entries = _entries_from_feed(resp.content)
+                for entry in entries[:10]:
                     published = _parse_date(
-                        getattr(entry, "published", None)
-                        or getattr(entry, "updated", None)
+                        getattr(entry, "published", None) or getattr(entry, "updated", None)
                     )
                     if not _within_lookback(published, since):
                         continue
                     title = getattr(entry, "title", "").strip() or "(tweet)"
                     link = getattr(entry, "link", "") or ""
-                    if link and "twitter.com" not in link and "x.com" not in link:
-                        link = link.replace(instance, "https://twitter.com")
                     summary = _cut(
                         getattr(entry, "summary", None) or getattr(entry, "description", None)
                     )
@@ -366,22 +520,29 @@ def fetch_twitter_profiles(result: ScrapeResult, seen: set[str], since: datetime
                         NewsItem(
                             title=f"@{username}: {title}",
                             url=link,
-                            source=f"X: {display_name}",
+                            source=name,
                             published=published.isoformat() if published else None,
                             summary=summary,
                             category="social",
                         )
                     )
-                fetched = True
-                break
+                if batch:
+                    break
             except Exception:
                 continue
-        if not fetched:
-            result.errors.append(
-                f"X/@{username}: no RSS mirror responded (Nitter instances may be down)"
-            )
 
-    _add_items(result, batch, seen, "twitter")
+        if not batch:
+            error = "No RSS mirror responded"
+
+        added = _add_items(result, batch, seen)
+        _record_source(
+            result,
+            name,
+            bool(added),
+            len(added),
+            error=error if not added else None,
+            stat_key=f"twitter:{username}",
+        )
 
 
 def _guess_category(title: str, body: str) -> str:
