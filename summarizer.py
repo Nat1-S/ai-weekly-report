@@ -203,13 +203,16 @@ Rules:
 
 def _extract_json(text: str) -> dict[str, Any]:
     text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             return json.loads(match.group())
-        raise
+        raise ValueError(f"Claude returned invalid JSON: {text[:300]}...")
 
 
 def _as_list(value: Any) -> list[str]:
@@ -332,19 +335,27 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         raise ValueError("ANTHROPIC_API_KEY is not set")
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    message = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": _build_user_prompt(scrape)}],
-    )
+    try:
+        message = client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": _build_user_prompt(scrape)}],
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Claude API call failed (model={config.CLAUDE_MODEL}): {exc}"
+        ) from exc
 
     raw = ""
     for block in message.content:
         if hasattr(block, "text"):
             raw += block.text
 
-    data = _extract_json(raw)
+    try:
+        data = _extract_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError(f"Failed to parse Claude JSON response: {exc}") from exc
     report_date = datetime.now(config.LOCAL_TZ).strftime("%d %B %Y")
 
     return ReportContent(

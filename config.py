@@ -5,14 +5,14 @@ from zoneinfo import ZoneInfo
 
 # --- API keys & delivery ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-sonnet-4-20250514"
 
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", GMAIL_USER)
-EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX", "AI Weekly Report")
+EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT") or GMAIL_USER
+EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX") or "AI Weekly Report"
 
-REPORT_LANGUAGE = os.environ.get("REPORT_LANGUAGE", "hebrew")
+REPORT_LANGUAGE = os.environ.get("REPORT_LANGUAGE") or "hebrew"
 
 # --- Scraping window ---
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))
