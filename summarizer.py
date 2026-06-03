@@ -28,24 +28,33 @@ class ReportContent:
 
     def sections(self) -> list[tuple[str, str, str]]:
         """Return (id, title, html_content) for email template."""
+        if config.REPORT_LANGUAGE.lower() in ("he", "hebrew", "עברית"):
+            titles = {
+                "executive": "סיכום מנהלים",
+                "research": "מודלים ומחקר",
+                "products": "מוצרים וכלים",
+                "business": "עסקים ושוק",
+                "technical": "פינה טכנית",
+                "takeaway": "מסקנה מרכזית",
+            }
+        else:
+            titles = {
+                "executive": "Executive Summary",
+                "research": "Models & Research",
+                "products": "Products & Tools",
+                "business": "Business & Market",
+                "technical": "Technical Corner",
+                "takeaway": "Key Takeaway",
+            }
         return [
-            ("executive", "Executive Summary", self.executive_summary),
-            ("research", "Models & Research", self.models_research),
-            ("products", "Products & Tools", self.products_tools),
-            ("business", "Business & Market", self.business_market),
-            ("technical", "Technical Corner", self.technical_corner),
-            ("takeaway", "Key Takeaway", self.key_takeaway),
+            ("executive", titles["executive"], self.executive_summary),
+            ("research", titles["research"], self.models_research),
+            ("products", titles["products"], self.products_tools),
+            ("business", titles["business"], self.business_market),
+            ("technical", titles["technical"], self.technical_corner),
+            ("takeaway", titles["takeaway"], self.key_takeaway),
         ]
 
-
-SECTION_WEIGHTS = {
-    "executive_summary": "20%",
-    "models_research": "20%",
-    "products_tools": "25%",
-    "business_market": "25%",
-    "technical_corner": "5%",
-    "key_takeaway": "5%",
-}
 
 SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise weekly intelligence brief.
 Use ONLY the provided source items. Do not invent news. If a section lacks evidence, say so briefly.

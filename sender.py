@@ -12,6 +12,10 @@ import config
 from summarizer import ReportContent
 
 
+def _is_hebrew_report() -> bool:
+    return config.REPORT_LANGUAGE.lower() in ("he", "hebrew", "עברית")
+
+
 def _text_to_html(text: str) -> str:
     escaped = html.escape(text.strip())
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", escaped) if p.strip()]
@@ -25,14 +29,15 @@ def _text_to_html(text: str) -> str:
             parts.append(f"<ul>{lis}</ul>")
         else:
             lines = p.replace("\n", "<br>")
-            parts.append(f"<p>{lines}</p>")
+            parts.append(f'<p dir="auto">{lines}</p>')
     return "\n".join(parts)
 
 
 def build_plain_text_email(report: ReportContent) -> str:
+    he = _is_hebrew_report()
     lines = [
-        f"AI Weekly Intelligence Report — {report.report_date}",
-        f"Sources scanned: {report.sources_used}",
+        f"{'דוח AI שבועי' if he else 'AI Weekly Intelligence Report'} — {report.report_date}",
+        f"{'מקורות שנסרקו' if he else 'Sources scanned'}: {report.sources_used}",
         "",
     ]
     for _id, title, body in report.sections():
@@ -41,12 +46,18 @@ def build_plain_text_email(report: ReportContent) -> str:
         lines.append(body.strip())
         lines.append("")
     if report.scrape_errors:
-        lines.append("SCRAPE NOTES")
+        lines.append("הערות סריקה" if he else "SCRAPE NOTES")
         lines.extend(f"- {e}" for e in report.scrape_errors[:8])
     return "\n".join(lines).strip()
 
 
 def build_html_email(report: ReportContent) -> str:
+    he = _is_hebrew_report()
+    html_dir = "rtl" if he else "ltr"
+    html_lang = "he" if he else "en"
+    text_align = "right" if he else "left"
+    list_pad = "padding-right: 1.25rem; padding-left: 0;" if he else "padding-left: 1.25rem;"
+
     sections_html = []
     for _id, title, body in report.sections():
         sections_html.append(
@@ -61,23 +72,31 @@ def build_html_email(report: ReportContent) -> str:
     warnings = ""
     if report.scrape_errors:
         warn_items = "".join(f"<li>{html.escape(e)}</li>" for e in report.scrape_errors[:8])
-        warnings = f'<div class="warn"><strong>Scrape notes:</strong><ul>{warn_items}</ul></div>'
+        warn_label = "הערות סריקה:" if he else "Scrape notes:"
+        warnings = f'<div class="warn"><strong>{warn_label}</strong><ul>{warn_items}</ul></div>'
+
+    title = "דוח מודיעין AI שבועי" if he else "AI Weekly Intelligence Report"
+    meta_sources = "מקורות שנסרקו" if he else "sources scanned"
+    takeaway_title = "מסקנה מרכזית" if he else "Key Takeaway"
+    footer_text = "דוח אוטומטי · GitHub Actions" if he else "Automated report · GitHub Actions"
 
     return f"""<!DOCTYPE html>
-<html lang="he" dir="auto">
+<html lang="{html_lang}" dir="{html_dir}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Weekly Report — {html.escape(report.report_date)}</title>
+  <title>{html.escape(title)} — {html.escape(report.report_date)}</title>
   <style>
     body {{
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-      line-height: 1.55;
+      line-height: 1.65;
       color: #1a1a2e;
       max-width: 720px;
       margin: 0 auto;
       padding: 24px 20px;
       background: #f8f9fc;
+      direction: {html_dir};
+      text-align: {text_align};
     }}
     .card {{
       background: #fff;
@@ -103,7 +122,8 @@ def build_html_email(report: ReportContent) -> str:
       color: #16213e;
     }}
     .body p, .body ul {{ margin: 0 0 10px; }}
-    .body ul {{ padding-left: 1.25rem; }}
+    .body ul {{ {list_pad} }}
+    .body li {{ margin-bottom: 6px; }}
     .takeaway {{
       background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
       border-radius: 8px;
@@ -117,6 +137,7 @@ def build_html_email(report: ReportContent) -> str:
       border-radius: 8px;
       padding: 10px 14px;
       margin-top: 20px;
+      text-align: {text_align};
     }}
     footer {{
       text-align: center;
@@ -128,16 +149,16 @@ def build_html_email(report: ReportContent) -> str:
 </head>
 <body>
   <div class="card">
-    <h1>🤖 AI Weekly Intelligence Report</h1>
-    <p class="meta">{html.escape(report.report_date)} · {report.sources_used} sources scanned</p>
+    <h1>🤖 {html.escape(title)}</h1>
+    <p class="meta">{html.escape(report.report_date)} · {report.sources_used} {meta_sources}</p>
     {''.join(sections_html[:-1])}
     <section class="block takeaway" id="takeaway">
-      <h2>Key Takeaway</h2>
+      <h2>{html.escape(takeaway_title)}</h2>
       <div class="body">{_text_to_html(report.key_takeaway)}</div>
     </section>
     {warnings}
   </div>
-  <footer>Automated report · GitHub Actions</footer>
+  <footer>{footer_text}</footer>
 </body>
 </html>"""
 

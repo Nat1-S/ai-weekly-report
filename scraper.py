@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -105,13 +106,12 @@ def _add_items(
 
 
 def fetch_rss_feeds(result: ScrapeResult, seen: set[str], since: datetime) -> None:
+    session = _session()
     for name, url in config.RSS_FEEDS.items():
         try:
-            parsed = feedparser.parse(
-                url,
-                agent=config.USER_AGENT,
-                request_headers={"User-Agent": config.USER_AGENT},
-            )
+            resp = session.get(url, timeout=config.REQUEST_TIMEOUT, allow_redirects=True)
+            resp.raise_for_status()
+            parsed = feedparser.parse(resp.content)
             if getattr(parsed, "bozo", False) and not parsed.entries:
                 result.errors.append(f"RSS {name}: parse error")
                 continue
@@ -157,12 +157,17 @@ def fetch_hf_trending_papers(result: ScrapeResult, seen: set[str], since: dateti
         batch: list[NewsItem] = []
         for row in data if isinstance(data, list) else []:
             paper = row.get("paper") or row
-            title = (paper.get("title") or "").strip()
+            title = (row.get("title") or paper.get("title") or "").strip()
             if not title:
                 continue
             arxiv_id = paper.get("id") or paper.get("arxivId") or ""
             url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "https://huggingface.co/papers"
-            published = _parse_date(paper.get("publishedAt") or paper.get("published_at"))
+            published = _parse_date(
+                row.get("publishedAt")
+                or paper.get("submittedOnDailyAt")
+                or paper.get("publishedAt")
+                or paper.get("published_at")
+            )
             if not _within_lookback(published, since):
                 continue
             upvotes = paper.get("upvotes") or paper.get("numComments")
@@ -230,54 +235,63 @@ def fetch_hacker_news(result: ScrapeResult, seen: set[str], since: datetime) -> 
 
 def fetch_arxiv(result: ScrapeResult, seen: set[str], since: datetime) -> None:
     cat_query = "+OR+".join(f"cat:{c}" for c in config.ARXIV_CATEGORIES)
-    try:
-        resp = _session().get(
-            config.ARXIV_API_URL,
-            params={
-                "search_query": cat_query,
-                "sortBy": "submittedDate",
-                "sortOrder": "descending",
-                "max_results": 40,
-            },
-            timeout=config.REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-        batch: list[NewsItem] = []
-        for entry in root.findall("atom:entry", ns):
-            title_el = entry.find("atom:title", ns)
-            title = (title_el.text or "").strip().replace("\n", " ") if title_el is not None else ""
-            link_el = entry.find("atom:id", ns)
-            url = (link_el.text or "").strip() if link_el is not None else ""
-            published_el = entry.find("atom:published", ns)
-            published_dt = _parse_date(
-                published_el.text if published_el is not None else None
+    params = {
+        "search_query": cat_query,
+        "sortBy": "submittedDate",
+        "sortOrder": "descending",
+        "max_results": 20,
+    }
+    session = _session()
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            if attempt:
+                time.sleep(4 * attempt)
+            resp = session.get(
+                config.ARXIV_API_URL,
+                params=params,
+                timeout=config.REQUEST_TIMEOUT,
             )
-            if not _within_lookback(published_dt, since):
-                continue
-            summary_el = entry.find("atom:summary", ns)
-            summary = _cut(summary_el.text if summary_el is not None else None)
-            batch.append(
-                NewsItem(
-                    title=title,
-                    url=url,
-                    source="API: ArXiv",
-                    published=published_dt.isoformat() if published_dt else None,
-                    summary=summary,
-                    category="research",
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            batch: list[NewsItem] = []
+            for entry in root.findall("atom:entry", ns):
+                title_el = entry.find("atom:title", ns)
+                title = (title_el.text or "").strip().replace("\n", " ") if title_el is not None else ""
+                link_el = entry.find("atom:id", ns)
+                url = (link_el.text or "").strip() if link_el is not None else ""
+                published_el = entry.find("atom:published", ns)
+                published_dt = _parse_date(
+                    published_el.text if published_el is not None else None
                 )
-            )
-        _add_items(result, batch, seen, "arxiv")
-    except Exception as exc:  # noqa: BLE001
-        result.errors.append(f"ArXiv: {exc}")
+                if not _within_lookback(published_dt, since):
+                    continue
+                summary_el = entry.find("atom:summary", ns)
+                summary = _cut(summary_el.text if summary_el is not None else None)
+                batch.append(
+                    NewsItem(
+                        title=title,
+                        url=url,
+                        source="API: ArXiv",
+                        published=published_dt.isoformat() if published_dt else None,
+                        summary=summary,
+                        category="research",
+                    )
+                )
+            _add_items(result, batch, seen, "arxiv")
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    result.errors.append(f"ArXiv: {last_exc}")
 
 
 def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
+    """Reddit via public RSS (more reliable than JSON from CI runners)."""
     session = _session()
     batch: list[NewsItem] = []
     for sub in config.REDDIT_SUBREDDITS:
-        url = f"{config.REDDIT_BASE}/r/{sub}/top.json"
+        url = f"{config.REDDIT_BASE}/r/{sub}/top/.rss"
         try:
             resp = session.get(
                 url,
@@ -286,26 +300,26 @@ def fetch_reddit(result: ScrapeResult, seen: set[str], since: datetime) -> None:
                 headers={"User-Agent": config.USER_AGENT},
             )
             resp.raise_for_status()
-            for child in resp.json().get("data", {}).get("children", []):
-                post = child.get("data", {})
-                title = post.get("title", "").strip()
-                permalink = post.get("permalink", "")
-                link = post.get("url") or f"{config.REDDIT_BASE}{permalink}"
-                created = post.get("created_utc")
-                published_dt = (
-                    datetime.fromtimestamp(created, tz=timezone.utc) if created else None
+            parsed = feedparser.parse(resp.content)
+            for entry in parsed.entries:
+                title = getattr(entry, "title", "").strip()
+                link = getattr(entry, "link", "") or ""
+                published = _parse_date(
+                    getattr(entry, "published", None) or getattr(entry, "updated", None)
                 )
-                if not _within_lookback(published_dt, since):
+                if not _within_lookback(published, since):
                     continue
+                summary = _cut(
+                    getattr(entry, "summary", None) or getattr(entry, "description", None)
+                )
                 batch.append(
                     NewsItem(
                         title=title,
                         url=link,
-                        source=f"API: Reddit r/{sub}",
-                        published=published_dt.isoformat() if published_dt else None,
-                        summary=_cut(post.get("selftext")),
-                        category=_guess_category(title, post.get("selftext") or ""),
-                        score=post.get("score"),
+                        source=f"Reddit r/{sub}",
+                        published=published.isoformat() if published else None,
+                        summary=summary,
+                        category=_guess_category(title, summary or ""),
                     )
                 )
         except Exception as exc:  # noqa: BLE001

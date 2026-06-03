@@ -20,6 +20,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 export ANTHROPIC_API_KEY="..."
+export CLAUDE_MODEL="claude-sonnet-4-20250514"  # אופציונלי
 export GMAIL_USER="you@gmail.com"
 export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
 export EMAIL_RECIPIENT="you@gmail.com"  # אופציונלי

@@ -29,14 +29,10 @@ USER_AGENT = os.environ.get(
 # --- RSS feeds (free) ---
 RSS_FEEDS = {
     "Hugging Face Blog": "https://huggingface.co/blog/feed.xml",
-    "Hugging Face Papers (community RSS)": "https://jamesg.blog/hf-papers.xml",
     "TechCrunch AI": "https://techcrunch.com/category/artificial-intelligence/feed/",
     "VentureBeat AI": "https://venturebeat.com/category/ai/feed/",
     "MIT Tech Review AI": "https://www.technologyreview.com/topic/artificial-intelligence/feed/",
-    "The Batch (DeepLearning.AI)": "https://www.deeplearning.ai/the-batch/feed/",
-    "The Rundown AI": "https://www.therundown.ai/feed",
     "OpenAI News": "https://openai.com/blog/rss.xml",
-    "Anthropic Newsroom": "https://www.anthropic.com/rss.xml",
     "Product Hunt": "https://www.producthunt.com/feed",
 }
 
@@ -46,11 +42,11 @@ HF_DAILY_PAPERS_URL = "https://huggingface.co/api/daily_papers"
 # Hacker News (Algolia API — free)
 HN_ALGOLIA_URL = "https://hn.algolia.com/api/v1/search"
 
-# ArXiv (free)
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+# ArXiv (free) — HTTPS + polite rate limits
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ARXIV_CATEGORIES = ("cs.AI", "cs.LG", "cs.CL")
 
-# Reddit (JSON endpoints — no OAuth for read-only)
+# Reddit — RSS feeds (JSON API often returns 403 from CI IPs)
 REDDIT_SUBREDDITS = ("MachineLearning", "artificial", "OpenAI")
 REDDIT_BASE = "https://www.reddit.com"
 
