@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -12,6 +13,23 @@ from anthropic import Anthropic
 
 import config
 from scraper import ScrapeResult, items_to_prompt_blob
+
+
+def sanitize_plain_text(text: str) -> str:
+    """Strip HTML/escaped markup from LLM or scrape text before rendering."""
+    if not text:
+        return ""
+    cleaned = html.unescape(str(text))
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    cleaned = re.sub(r"&lt;[^&]*?&gt;", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?span[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*dir="[^"]*"', "", cleaned)
+    cleaned = re.sub(r'\s*style="[^"]*"', "", cleaned)
+    cleaned = re.sub(r"unicode-bidi:\s*\w+;?", "", cleaned)
+    cleaned = re.sub(r"display:\s*inline-block;?", "", cleaned)
+    cleaned = re.sub(r"text-align:\s*\w+;?", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 @dataclass
@@ -153,7 +171,7 @@ SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise wee
 Use ONLY the provided source items. Do not invent news.
 Write in clear Hebrew when requested, but preserve English product/model names as-is (e.g. GPT-4, Claude, OpenAI).
 Keep summaries short. Target reading time: 5 minutes.
-Return valid JSON only. No markdown. No code fences. No prose outside JSON.
+Return valid JSON only. No markdown. No code fences. No HTML tags. Plain text strings only.
 Limits: models_research max 3 items, products_tools max 5, business_market max 5, executive_summary 3-4 bullets, pm_takeaways 2-3 bullets.
 Put English product/company names in the title field; keep summary and impact fields in Hebrew when Hebrew is requested."""
 
@@ -194,7 +212,7 @@ Return JSON with exactly this schema:
   ],
   "technical_corner": {{"title": "...", "explanation": "..."}},
   "pm_takeaways": ["actionable takeaway 1", "actionable takeaway 2"],
-  "sources": [{{"name": "...", "url": "..."}}]
+  "sources": [{{"name": "OpenAI News - Codex plugins", "url": ""}}]
 }}
 
 Rules:
@@ -205,7 +223,7 @@ Rules:
 - pm_takeaways: 2-3 actionable bullets for a PM
 - title fields: use English product/company names where appropriate
 - summary/why_it_matters/relevance: Hebrew when Hebrew is requested
-- sources: up to 8 most important cited sources with real URLs from the input
+- sources: up to 8 key citations as plain text lines "Source Name - Article title" in the name field (no HTML, no URLs in name)
 - Do NOT include scrape_status in your response
 """
 
@@ -226,9 +244,9 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+        return [sanitize_plain_text(str(v)) for v in value if sanitize_plain_text(str(v))]
     if isinstance(value, str) and value.strip():
-        return [value.strip()]
+        return [sanitize_plain_text(value)]
     return []
 
 
@@ -239,14 +257,14 @@ def _parse_research(items: Any) -> list[ResearchItem]:
     for row in items:
         if not isinstance(row, dict):
             continue
-        title = str(row.get("title", "")).strip()
+        title = sanitize_plain_text(str(row.get("title", "")))
         if not title:
             continue
         out.append(
             ResearchItem(
                 title=title,
-                summary=str(row.get("summary", "")).strip(),
-                why_it_matters=str(row.get("why_it_matters", "")).strip(),
+                summary=sanitize_plain_text(str(row.get("summary", ""))),
+                why_it_matters=sanitize_plain_text(str(row.get("why_it_matters", ""))),
             )
         )
     return out
@@ -259,14 +277,14 @@ def _parse_products(items: Any) -> list[ProductItem]:
     for row in items:
         if not isinstance(row, dict):
             continue
-        title = str(row.get("title", "")).strip()
+        title = sanitize_plain_text(str(row.get("title", "")))
         if not title:
             continue
         out.append(
             ProductItem(
                 title=title,
-                summary=str(row.get("summary", "")).strip(),
-                relevance=str(row.get("relevance", "")).strip(),
+                summary=sanitize_plain_text(str(row.get("summary", ""))),
+                relevance=sanitize_plain_text(str(row.get("relevance", ""))),
             )
         )
     return out
@@ -279,14 +297,14 @@ def _parse_business(items: Any) -> list[BusinessItem]:
     for row in items:
         if not isinstance(row, dict):
             continue
-        title = str(row.get("title", "")).strip()
+        title = sanitize_plain_text(str(row.get("title", "")))
         if not title:
             continue
         out.append(
             BusinessItem(
                 title=title,
-                summary=str(row.get("summary", "")).strip(),
-                why_it_matters=str(row.get("why_it_matters", "")).strip(),
+                summary=sanitize_plain_text(str(row.get("summary", ""))),
+                why_it_matters=sanitize_plain_text(str(row.get("why_it_matters", ""))),
             )
         )
     return out
@@ -295,8 +313,8 @@ def _parse_business(items: Any) -> list[BusinessItem]:
 def _parse_technical(value: Any) -> TechnicalCorner | None:
     if not isinstance(value, dict):
         return None
-    title = str(value.get("title", "")).strip()
-    explanation = str(value.get("explanation", "")).strip()
+    title = sanitize_plain_text(str(value.get("title", "")))
+    explanation = sanitize_plain_text(str(value.get("explanation", "")))
     if not title and not explanation:
         return None
     return TechnicalCorner(title=title or "Technical Corner", explanation=explanation)
@@ -322,10 +340,10 @@ def _parse_sources(items: Any) -> list[SourceRef]:
     for row in items:
         if not isinstance(row, dict):
             continue
-        name = str(row.get("name", "")).strip()
-        url = str(row.get("url", "")).strip()
-        if name and url:
-            out.append(SourceRef(name=name, url=url))
+        name = sanitize_plain_text(str(row.get("name", "")))
+        url = sanitize_plain_text(str(row.get("url", "")))
+        if name:
+            out.append(SourceRef(name=name, url=url if url.startswith("http") else ""))
     return out
 
 
@@ -340,7 +358,13 @@ def _build_scrape_status(scrape: ScrapeResult) -> ScrapeStatusSummary:
         )
         for s in scrape.sources
     ]
-    failed_list = scrape.failed_sources
+    failed_list = [
+        {
+            "name": sanitize_plain_text(f["name"]),
+            "error": sanitize_plain_text(f["error"]),
+        }
+        for f in scrape.failed_sources
+    ]
     return ScrapeStatusSummary(
         total_sources=scrape.sources_scanned,
         successful_sources=scrape.sources_succeeded,

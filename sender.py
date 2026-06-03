@@ -15,17 +15,11 @@ from summarizer import (
     ReportContent,
     ResearchItem,
     TechnicalCorner,
+    sanitize_plain_text,
 )
 
-KNOWN_LTR_TERMS = (
-    "OpenAI", "Anthropic", "Claude", "Gemini", "Microsoft", "NVIDIA", "Cursor",
-    "LangChain", "MCP", "GPT-4", "GPT-5", "DeepMind", "Google", "Meta", "Amazon",
-    "Hugging Face", "ArXiv", "GitHub", "AWS", "Azure", "Copilot", "ChatGPT",
-    "DeepLearning.AI", "Product Hunt", "Hacker News", "TechCrunch", "VentureBeat",
-)
-
-LTR_STYLE = 'dir="ltr" style="unicode-bidi:isolate;display:inline-block;text-align:left;"'
-LTR_SPAN = f"<span {LTR_STYLE}>"
+LTR_SPAN_OPEN = '<span dir="ltr" style="unicode-bidi:isolate;display:inline-block;text-align:left;">'
+LTR_SPAN_CLOSE = "</span>"
 
 
 def _is_hebrew_report() -> bool:
@@ -37,26 +31,41 @@ def _esc(text: str) -> str:
 
 
 def _wrap_ltr(text: str) -> str:
-    """Wrap Latin/English runs so they render correctly inside RTL Hebrew."""
-    if not text.strip():
+    """Wrap Latin runs in LTR spans; input must be plain text only."""
+    text = sanitize_plain_text(text)
+    if not text:
         return ""
-    escaped = _esc(text)
-    for term in sorted(KNOWN_LTR_TERMS, key=len, reverse=True):
-        escaped = escaped.replace(term, f"{LTR_SPAN}{term}</span>")
-    escaped = re.sub(
-        r"(?<![\w/.])([A-Za-z][A-Za-z0-9+.#\-_/]*(?:\s+[A-Za-z][A-Za-z0-9+.#\-_/]*)*)",
-        lambda m: f'{LTR_SPAN}{m.group(1)}</span>'
-        if "<span" not in m.group(0)
-        else m.group(0),
-        escaped,
+    parts: list[str] = []
+    last = 0
+    latin_pattern = re.compile(
+        r"[A-Za-z][A-Za-z0-9+.#\-_/]*(?:\s+[A-Za-z][A-Za-z0-9+.#\-_/]*)*"
     )
-    return escaped
+    for match in latin_pattern.finditer(text):
+        if match.start() > last:
+            parts.append(html.escape(text[last : match.start()]))
+        parts.append(f"{LTR_SPAN_OPEN}{html.escape(match.group(0))}{LTR_SPAN_CLOSE}")
+        last = match.end()
+    if last < len(text):
+        parts.append(html.escape(text[last:]))
+    return "".join(parts) if parts else html.escape(text)
+
+
+def _validate_report_html(html_body: str, labels: dict[str, str]) -> None:
+    """Block emails where escaped HTML would show as visible text."""
+    body = re.sub(r"<style[^>]*>.*?</style>", "", html_body, flags=re.DOTALL | re.IGNORECASE)
+    for fragment in ("&lt;span", "&lt;/span", "&lt;style"):
+        if fragment in body:
+            raise ValueError(f"Report validation failed: visible fragment '{fragment}'")
+    if labels["title"] not in html_body:
+        raise ValueError("Report validation failed: title missing")
+    if labels["pm_takeaways"] not in html_body:
+        raise ValueError("Report validation failed: PM section title missing")
 
 
 def _labels() -> dict[str, str]:
     if _is_hebrew_report():
         return {
-            "title": "דוח מודיעין AI שבועי",
+            "title": "דוח AI שבועי",
             "period": "תקופת הדוח",
             "items_collected": "פריטים שנאספו",
             "sources_scanned": "מקורות שנסרקו",
@@ -65,7 +74,7 @@ def _labels() -> dict[str, str]:
             "products": "מוצרים וכלים",
             "business": "עסקים ושוק",
             "technical": "פינה טכנית",
-            "pm_takeaways": "מסקנות ל-PM",
+            "pm_takeaways": "מסקנות",
             "sources": "מקורות מרכזיים",
             "coverage_quality": "מקורות ואיכות הכיסוי",
             "sources_succeeded": "מקורות שהצליחו",
@@ -199,9 +208,9 @@ def _render_sources(report: ReportContent, labels: dict[str, str]) -> str:
         return ""
     items = "".join(
         f'<li style="margin-bottom:10px;line-height:1.6;">'
-        f'<a href="{_esc(s.url)}" style="color:#2563eb;text-decoration:none;">{_wrap_ltr(s.name)}</a>'
-        f"</li>"
+        f"{_wrap_ltr(s.name)}</li>"
         for s in report.sources[:8]
+        if s.name
     )
     return f"""
     <section style="margin-top:28px;">
@@ -214,14 +223,15 @@ def _render_sources(report: ReportContent, labels: dict[str, str]) -> str:
 def _render_coverage_quality_section(report: ReportContent, labels: dict[str, str]) -> str:
     he = _is_hebrew_report()
     s = report.scrape_status
-    reliability = s.reliability_label(hebrew=he)
     completeness = s.completeness_text(hebrew=he)
     transparency = s.transparency_text(hebrew=he)
 
     failed_block = ""
     if s.failed_source_list:
         failed_items = "".join(
-            f'<li style="margin-bottom:6px;">{_wrap_ltr(f["name"])} — {_esc(f["error"])}</li>'
+            f"<li style=\"margin-bottom:6px;\">"
+            f"{_wrap_ltr(sanitize_plain_text(f['name']))} — "
+            f"{_esc(sanitize_plain_text(f['error']))}</li>"
             for f in s.failed_source_list[:12]
         )
         failed_block = f"""
@@ -241,7 +251,6 @@ def _render_coverage_quality_section(report: ReportContent, labels: dict[str, st
         <tr><td style="padding:3px 0;">{_esc(labels["coverage_pct_label"])}: <strong style="color:#0f3460;">{s.coverage_percentage}%</strong></td></tr>
         <tr><td style="padding:3px 0;">{_esc(labels["total_items_week"])}: <strong style="color:#0f3460;">{s.total_articles_collected}</strong></td></tr>
       </table>
-      <p style="font-size:15px;font-weight:600;margin:12px 0 0;color:#1e293b;">{_esc(reliability)}</p>
       {failed_block}
       <p style="margin:10px 0 0;font-size:13px;line-height:1.6;color:#64748b;"><strong>{_esc(labels["completeness_title"])}:</strong> {_esc(completeness)}</p>
       <p style="margin:8px 0 0;font-size:13px;line-height:1.6;color:#64748b;">{_esc(transparency)}</p>
@@ -316,7 +325,7 @@ def build_plain_text_email(report: ReportContent) -> str:
         f"{labels['sources_succeeded']}: {s.successful_sources}",
         f"{labels['sources_failed']}: {s.failed_source_count}",
         f"{labels['coverage_pct_label']}: {s.coverage_percentage}%",
-        s.reliability_label(hebrew=_is_hebrew_report()),
+        f"{labels['total_items_week']}: {s.total_articles_collected}",
     ])
     return "\n".join(lines).strip()
 
@@ -393,6 +402,7 @@ def send_email(report: ReportContent) -> None:
         raise ValueError("GMAIL_USER and GMAIL_APP_PASSWORD must be set")
 
     html_body = build_html_email(report)
+    _validate_report_html(html_body, _labels())
     plain_body = build_plain_text_email(report)
     subject = f"{config.EMAIL_SUBJECT_PREFIX} — {report.period_display}"
 

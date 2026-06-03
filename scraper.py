@@ -115,7 +115,8 @@ def _display_source_name(name: str) -> str:
 def _humanize_error(msg: str | None) -> str:
     if not msg:
         return "Unknown error"
-    text = re.sub(r"https?://\S+", "", msg)
+    text = re.sub(r"<[^>]+>", "", msg)
+    text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     lower = text.lower()
     if "403" in text or "forbidden" in lower or "blocked" in lower:
