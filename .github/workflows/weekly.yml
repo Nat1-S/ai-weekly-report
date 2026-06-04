@@ -3,8 +3,8 @@ name: AI Weekly Report
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 5 * * 4'
     - cron: '*/10 * * * *'
+    - cron: '0 5 * * 4'
 
 jobs:
   generate-and-send:
