@@ -1,10 +1,10 @@
 name: AI Weekly Report
 
 on:
-  schedule:
-    # Thursday 08:00 Asia/Jerusalem (UTC+3) = 05:00 UTC
-    - cron: "0 5 * * 4"
   workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 4'
+    - cron: '*/10 * * * *'
 
 jobs:
   generate-and-send:
@@ -12,6 +12,14 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Print trigger context
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          date -u
+
       - name: Checkout
         uses: actions/checkout@v4
 
