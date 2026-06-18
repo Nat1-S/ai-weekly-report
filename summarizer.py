@@ -381,16 +381,18 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         raise ValueError("ANTHROPIC_API_KEY is not set")
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    model = config.ANTHROPIC_MODEL
+    print(f"Using Anthropic model: {model}")
     try:
         message = client.messages.create(
-            model=config.CLAUDE_MODEL,
+            model=model,
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_user_prompt(scrape)}],
         )
     except Exception as exc:
         raise RuntimeError(
-            f"Claude API call failed (model={config.CLAUDE_MODEL}): {exc}"
+            f"Claude API call failed (model={model}): {exc}"
         ) from exc
 
     raw = ""
