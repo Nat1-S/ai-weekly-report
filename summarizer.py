@@ -362,31 +362,64 @@ def _report_tool_definition() -> dict[str, Any]:
     }
 
 
+def _value_preview(value: Any, limit: int = 200) -> str:
+    text = re.sub(r"\s+", " ", str(value))[:limit]
+    return text + ("..." if len(str(value)) > limit else "")
+
+
+def _is_nonempty(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return len(value) > 0
+    return True
+
+
 def _field_value(data: dict[str, Any], *keys: str) -> Any:
+    fallback: Any = None
     for key in keys:
-        if key in data:
-            return data[key]
-    return None
+        if key not in data:
+            continue
+        value = data[key]
+        if _is_nonempty(value):
+            return value
+        if fallback is None:
+            fallback = value
+    return fallback
 
 
 def _normalize_report_data(data: dict[str, Any]) -> dict[str, Any]:
     log.info("Report tool input keys before normalization: %s", list(data.keys()))
     normalized = dict(data)
 
-    if "technical_corner" not in normalized:
+    if not _is_nonempty(normalized.get("technical_corner")):
         for alias in ("technical", "technical_section", "tech_corner"):
-            if alias in normalized:
+            if _is_nonempty(normalized.get(alias)):
                 normalized["technical_corner"] = normalized[alias]
                 break
 
-    if "conclusions" not in normalized:
+    if not _is_nonempty(normalized.get("conclusions")):
         for alias in ("pm_takeaways", "takeaways"):
-            if alias in normalized:
+            if _is_nonempty(normalized.get(alias)):
                 normalized["conclusions"] = normalized[alias]
                 break
 
     log.info("Report tool input keys after normalization: %s", list(normalized.keys()))
     return normalized
+
+
+def _log_section_shapes(data: dict[str, Any]) -> None:
+    log.info("Report top-level keys before render: %s", list(data.keys()))
+    technical = _field_value(
+        data, "technical_corner", "technical", "technical_section", "tech_corner"
+    )
+    conclusions = _field_value(data, "conclusions", "pm_takeaways", "takeaways")
+    log.info("technical_corner type: %s", type(technical).__name__)
+    log.info("technical_corner preview: %s", _value_preview(technical))
+    log.info("conclusions type: %s", type(conclusions).__name__)
+    log.info("conclusions preview: %s", _value_preview(conclusions))
 
 
 def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
@@ -425,6 +458,57 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [sanitize_plain_text(value)]
     return []
+
+
+def _parse_conclusions(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str) and value.strip():
+        return _as_list(value)
+    if isinstance(value, dict):
+        text = (
+            value.get("text")
+            or value.get("summary")
+            or value.get("conclusion")
+            or value.get("takeaway")
+            or value.get("title")
+        )
+        if text:
+            return [sanitize_plain_text(str(text))]
+        parts = [
+            sanitize_plain_text(str(part))
+            for part in value.values()
+            if isinstance(part, str) and sanitize_plain_text(str(part))
+        ]
+        return parts
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                cleaned = sanitize_plain_text(item)
+                if cleaned:
+                    out.append(cleaned)
+            elif isinstance(item, dict):
+                title = sanitize_plain_text(str(item.get("title", "")))
+                body = sanitize_plain_text(
+                    str(
+                        item.get("text")
+                        or item.get("summary")
+                        or item.get("conclusion")
+                        or item.get("takeaway")
+                        or item.get("description")
+                        or item.get("explanation")
+                        or ""
+                    )
+                )
+                if title and body:
+                    out.append(f"{title}: {body}")
+                elif body:
+                    out.append(body)
+                elif title:
+                    out.append(title)
+        return out
+    return _as_list(value)
 
 
 def _parse_research(items: Any) -> list[ResearchItem]:
@@ -488,12 +572,42 @@ def _parse_business(items: Any) -> list[BusinessItem]:
 
 
 def _parse_technical(value: Any) -> TechnicalCorner | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip():
+        return TechnicalCorner(
+            title="Technical Corner",
+            explanation=sanitize_plain_text(value),
+        )
+    if isinstance(value, list):
+        for item in value:
+            parsed = _parse_technical(item)
+            if parsed:
+                return parsed
+        return None
     if not isinstance(value, dict):
         return None
-    title = sanitize_plain_text(str(value.get("title", "")))
-    explanation = sanitize_plain_text(str(value.get("explanation", "")))
+    title = sanitize_plain_text(
+        str(value.get("title") or value.get("name") or value.get("heading") or "")
+    )
+    explanation = sanitize_plain_text(
+        str(
+            value.get("explanation")
+            or value.get("summary")
+            or value.get("description")
+            or value.get("text")
+            or ""
+        )
+    )
     if not title and not explanation:
-        return None
+        parts = [
+            sanitize_plain_text(str(part))
+            for part in value.values()
+            if isinstance(part, str) and sanitize_plain_text(str(part))
+        ]
+        if not parts:
+            return None
+        return TechnicalCorner(title="Technical Corner", explanation=" — ".join(parts))
     return TechnicalCorner(title=title or "Technical Corner", explanation=explanation)
 
 
@@ -582,6 +696,23 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         datetime.now(config.LOCAL_TZ)
     )
 
+    _log_section_shapes(data)
+    technical_raw = _field_value(
+        data,
+        "technical_corner",
+        "technical",
+        "technical_section",
+        "tech_corner",
+    )
+    conclusions_raw = _field_value(data, "conclusions", "pm_takeaways", "takeaways")
+    technical_corner = _parse_technical(technical_raw)
+    pm_takeaways = _parse_conclusions(conclusions_raw)[:3]
+    log.info(
+        "Parsed technical_corner: %s",
+        technical_corner.title if technical_corner else None,
+    )
+    log.info("Parsed conclusions count: %d", len(pm_takeaways))
+
     return ReportContent(
         report_date=report_date,
         period_display=period_display,
@@ -591,18 +722,8 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         models_research=_parse_research(data.get("models_research"))[:3],
         products_tools=_parse_products(data.get("products_tools"))[:5],
         business_market=_parse_business(data.get("business_market"))[:5],
-        technical_corner=_parse_technical(
-            _field_value(
-                data,
-                "technical_corner",
-                "technical",
-                "technical_section",
-                "tech_corner",
-            )
-        ),
-        pm_takeaways=_as_list(
-            _field_value(data, "conclusions", "pm_takeaways", "takeaways")
-        )[:3],
+        technical_corner=technical_corner,
+        pm_takeaways=pm_takeaways,
         sources=_parse_sources(data.get("sources")),
         scrape_status=_build_scrape_status(scrape),
         items_collected=len(scrape.items),

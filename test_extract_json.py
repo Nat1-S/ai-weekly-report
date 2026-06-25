@@ -14,6 +14,7 @@ from summarizer import (
     _extract_json,
     _field_value,
     _normalize_report_data,
+    _parse_conclusions,
     _parse_technical,
     _report_data_from_message,
 )
@@ -96,7 +97,7 @@ class TestReportSectionMapping(unittest.TestCase):
         technical = _parse_technical(
             _field_value(data, "technical_corner", "technical", "technical_section", "tech_corner")
         )
-        conclusions = _as_list(_field_value(data, "conclusions", "pm_takeaways", "takeaways"))
+        conclusions = _parse_conclusions(_field_value(data, "conclusions", "pm_takeaways", "takeaways"))
 
         report = ReportContent(
             report_date="1 January 2026",
@@ -135,6 +136,33 @@ class TestReportSectionMapping(unittest.TestCase):
         self.assertIn("technical_corner", data)
         self.assertEqual(data["conclusions"], ["one"])
         self.assertEqual(data["technical_corner"]["title"], "LoRA")
+
+    def test_empty_conclusions_falls_back_to_pm_takeaways(self) -> None:
+        data = {
+            "conclusions": [],
+            "pm_takeaways": ["keep this takeaway"],
+        }
+        value = _field_value(data, "conclusions", "pm_takeaways", "takeaways")
+        parsed = _parse_conclusions(value)
+        self.assertEqual(parsed, ["keep this takeaway"])
+
+    def test_technical_corner_accepts_summary_field(self) -> None:
+        item = _parse_technical({"title": "KV cache", "summary": "why it matters"})
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item.explanation, "why it matters")
+
+    def test_conclusions_accepts_list_of_objects(self) -> None:
+        parsed = _parse_conclusions(
+            [{"title": "Track agents", "summary": "Evaluate tooling"}]
+        )
+        self.assertEqual(parsed, ["Track agents: Evaluate tooling"])
+
+    def test_technical_corner_accepts_plain_string(self) -> None:
+        item = _parse_technical("Plain technical note")
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item.explanation, "Plain technical note")
 
 
 if __name__ == "__main__":
