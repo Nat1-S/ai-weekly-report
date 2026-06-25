@@ -231,111 +231,41 @@ Rules:
 """
 
 
-def _unwrap_markdown_fence(text: str) -> str | None:
-    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return None
-
-
-def _balanced_json_span(text: str, start: int, opener: str, closer: str) -> str | None:
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
-
-
-def _iter_balanced_object_spans(text: str):
-    pos = 0
-    while pos < len(text):
-        start = text.find("{", pos)
-        if start == -1:
-            break
-        span = _balanced_json_span(text, start, "{", "}")
-        if span:
-            yield span
-            pos = start + 1
-        else:
-            pos = start + 1
-
-
-def _safe_json_preview(text: str, limit: int = 200) -> str:
+def _json_text_preview(text: str, limit: int = 200) -> str:
     preview = re.sub(r"\s+", " ", text.strip())[:limit]
     return preview + ("..." if len(text.strip()) > limit else "")
 
 
+def _clean_json_text(text: str) -> str:
+    cleaned = text.strip()
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", cleaned, re.DOTALL | re.IGNORECASE)
+    if fence:
+        cleaned = fence.group(1).strip()
+    elif cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned).strip()
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first != -1 and last != -1 and last >= first:
+        cleaned = cleaned[first : last + 1]
+    return cleaned
+
+
 def _extract_json(text: str) -> dict[str, Any]:
-    text = text.strip().lstrip("\ufeff")
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+    raw = text.strip()
+    log.info("Claude JSON raw preview: %s", _json_text_preview(raw))
 
-    last_error: Exception | None = None
+    cleaned = _clean_json_text(raw)
+    log.info("Claude JSON cleaned preview: %s", _json_text_preview(cleaned))
 
-    def try_parse(candidate: str, label: str) -> dict[str, Any] | None:
-        nonlocal last_error
-        try:
-            parsed = json.loads(candidate)
-            log.info(
-                "Claude JSON parse (%s): top-level type=%s",
-                label,
-                type(parsed).__name__,
-            )
-            if isinstance(parsed, dict):
-                log.info("Claude JSON top-level keys: %s", list(parsed.keys()))
-                return parsed
-            log.warning(
-                "Claude JSON parse (%s): skipping non-object top-level %s",
-                label,
-                type(parsed).__name__,
-            )
-            last_error = ValueError(f"Expected JSON object, got {type(parsed).__name__}")
-        except json.JSONDecodeError as exc:
-            log.warning(
-                "Claude JSON parse (%s): JSONDecodeError at %s: %s",
-                label,
-                exc.pos,
-                exc.msg,
-            )
-            last_error = exc
-        return None
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Claude returned invalid JSON: {raw[:300]}...") from exc
 
-    candidates: list[tuple[str, str]] = [("direct", text)]
-    fenced = _unwrap_markdown_fence(text)
-    if fenced and fenced != text:
-        candidates.append(("fenced", fenced))
-
-    for label, candidate in candidates:
-        parsed = try_parse(candidate, label)
-        if parsed is not None:
-            return parsed
-
-    for label, source in candidates:
-        for span in _iter_balanced_object_spans(source):
-            parsed = try_parse(span, f"{label}-object-span")
-            if parsed is not None:
-                return parsed
-
-    log.warning("Failed to parse Claude JSON response (preview): %s", _safe_json_preview(text))
-    raise ValueError(f"Claude returned invalid JSON: {text[:300]}...") from last_error
+    if isinstance(parsed, dict):
+        log.info("Claude JSON top-level keys: %s", list(parsed.keys()))
+    return parsed
 
 
 def _as_list(value: Any) -> list[str]:
