@@ -225,7 +225,8 @@ Rules:
 - models_research: maximum 3 items
 - products_tools: maximum 5 items
 - business_market: maximum 5 items
-- conclusions: 2-3 actionable bullets for a PM
+- technical_corner: REQUIRED with non-empty title and explanation
+- conclusions: REQUIRED with 2-3 non-empty actionable bullets for a PM
 - title fields: use English product/company names where appropriate
 - summary/why_it_matters/relevance: Hebrew when Hebrew is requested
 - sources: up to 8 key citations as plain text lines "Source Name - Article title" in the name field (no HTML, no URLs in name)
@@ -367,14 +368,16 @@ def _value_preview(value: Any, limit: int = 200) -> str:
     return text + ("..." if len(str(value)) > limit else "")
 
 
-def _is_nonempty(value: Any) -> bool:
+def _has_meaningful_content(value: Any) -> bool:
     if value is None:
         return False
     if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, dict)):
-        return len(value) > 0
-    return True
+        return bool(sanitize_plain_text(value))
+    if isinstance(value, list):
+        return any(_has_meaningful_content(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_meaningful_content(item) for item in value.values())
+    return bool(value)
 
 
 def _field_value(data: dict[str, Any], *keys: str) -> Any:
@@ -383,7 +386,7 @@ def _field_value(data: dict[str, Any], *keys: str) -> Any:
         if key not in data:
             continue
         value = data[key]
-        if _is_nonempty(value):
+        if _has_meaningful_content(value):
             return value
         if fallback is None:
             fallback = value
@@ -394,15 +397,15 @@ def _normalize_report_data(data: dict[str, Any]) -> dict[str, Any]:
     log.info("Report tool input keys before normalization: %s", list(data.keys()))
     normalized = dict(data)
 
-    if not _is_nonempty(normalized.get("technical_corner")):
+    if not _has_meaningful_content(normalized.get("technical_corner")):
         for alias in ("technical", "technical_section", "tech_corner"):
-            if _is_nonempty(normalized.get(alias)):
+            if _has_meaningful_content(normalized.get(alias)):
                 normalized["technical_corner"] = normalized[alias]
                 break
 
-    if not _is_nonempty(normalized.get("conclusions")):
+    if not _has_meaningful_content(normalized.get("conclusions")):
         for alias in ("pm_takeaways", "takeaways"):
-            if _is_nonempty(normalized.get(alias)):
+            if _has_meaningful_content(normalized.get(alias)):
                 normalized["conclusions"] = normalized[alias]
                 break
 
@@ -412,14 +415,22 @@ def _normalize_report_data(data: dict[str, Any]) -> dict[str, Any]:
 
 def _log_section_shapes(data: dict[str, Any]) -> None:
     log.info("Report top-level keys before render: %s", list(data.keys()))
-    technical = _field_value(
-        data, "technical_corner", "technical", "technical_section", "tech_corner"
-    )
-    conclusions = _field_value(data, "conclusions", "pm_takeaways", "takeaways")
-    log.info("technical_corner type: %s", type(technical).__name__)
-    log.info("technical_corner preview: %s", _value_preview(technical))
-    log.info("conclusions type: %s", type(conclusions).__name__)
-    log.info("conclusions preview: %s", _value_preview(conclusions))
+    for key in (
+        "technical_corner",
+        "technical",
+        "technical_section",
+        "tech_corner",
+        "conclusions",
+        "pm_takeaways",
+        "takeaways",
+    ):
+        if key in data:
+            log.info(
+                "Section field %s type=%s preview=%s",
+                key,
+                type(data[key]).__name__,
+                _value_preview(data[key]),
+            )
 
 
 def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
@@ -611,6 +622,33 @@ def _parse_technical(value: Any) -> TechnicalCorner | None:
     return TechnicalCorner(title=title or "Technical Corner", explanation=explanation)
 
 
+def _parse_technical_from_data(data: dict[str, Any]) -> TechnicalCorner | None:
+    for key in ("technical_corner", "technical", "technical_section", "tech_corner"):
+        if key not in data:
+            continue
+        parsed = _parse_technical(data[key])
+        if parsed and (
+            _has_meaningful_content(parsed.title)
+            or _has_meaningful_content(parsed.explanation)
+        ):
+            return parsed
+    return None
+
+
+def _parse_conclusions_from_data(data: dict[str, Any]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for key in ("conclusions", "pm_takeaways", "takeaways"):
+        if key not in data:
+            continue
+        for item in _parse_conclusions(data[key]):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
 def _format_period(now: datetime) -> tuple[str, str, str, str]:
     """Return (report_date, period_display, period_start, period_end)."""
     end = now.date()
@@ -677,7 +715,7 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
     try:
         message = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_user_prompt(scrape)}],
             tools=[_report_tool_definition()],
@@ -688,6 +726,8 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
             f"Claude API call failed (model={model}): {exc}"
         ) from exc
 
+    log.info("Claude stop_reason: %s", getattr(message, "stop_reason", None))
+
     try:
         data, _source = _report_data_from_message(message)
     except ValueError as exc:
@@ -697,16 +737,8 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
     )
 
     _log_section_shapes(data)
-    technical_raw = _field_value(
-        data,
-        "technical_corner",
-        "technical",
-        "technical_section",
-        "tech_corner",
-    )
-    conclusions_raw = _field_value(data, "conclusions", "pm_takeaways", "takeaways")
-    technical_corner = _parse_technical(technical_raw)
-    pm_takeaways = _parse_conclusions(conclusions_raw)[:3]
+    technical_corner = _parse_technical_from_data(data)
+    pm_takeaways = _parse_conclusions_from_data(data)[:3]
     log.info(
         "Parsed technical_corner: %s",
         technical_corner.title if technical_corner else None,

@@ -15,7 +15,9 @@ from summarizer import (
     _field_value,
     _normalize_report_data,
     _parse_conclusions,
+    _parse_conclusions_from_data,
     _parse_technical,
+    _parse_technical_from_data,
     _report_data_from_message,
 )
 from scraper import ScrapeResult
@@ -94,10 +96,8 @@ class TestReportSectionMapping(unittest.TestCase):
                 "sources": [],
             }
         )
-        technical = _parse_technical(
-            _field_value(data, "technical_corner", "technical", "technical_section", "tech_corner")
-        )
-        conclusions = _parse_conclusions(_field_value(data, "conclusions", "pm_takeaways", "takeaways"))
+        technical = _parse_technical_from_data(data)
+        conclusions = _parse_conclusions_from_data(data)
 
         report = ReportContent(
             report_date="1 January 2026",
@@ -142,9 +142,26 @@ class TestReportSectionMapping(unittest.TestCase):
             "conclusions": [],
             "pm_takeaways": ["keep this takeaway"],
         }
-        value = _field_value(data, "conclusions", "pm_takeaways", "takeaways")
-        parsed = _parse_conclusions(value)
+        parsed = _parse_conclusions_from_data(data)
         self.assertEqual(parsed, ["keep this takeaway"])
+
+    def test_placeholder_conclusions_falls_back_to_pm_takeaways(self) -> None:
+        data = {
+            "conclusions": [""],
+            "pm_takeaways": ["real takeaway"],
+        }
+        parsed = _parse_conclusions_from_data(data)
+        self.assertEqual(parsed, ["real takeaway"])
+
+    def test_placeholder_technical_corner_falls_back_to_alias(self) -> None:
+        data = {
+            "technical_corner": {"title": "", "explanation": ""},
+            "tech_corner": {"title": "LoRA", "summary": "efficient fine-tuning"},
+        }
+        item = _parse_technical_from_data(data)
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item.title, "LoRA")
 
     def test_technical_corner_accepts_summary_field(self) -> None:
         item = _parse_technical({"title": "KV cache", "summary": "why it matters"})
