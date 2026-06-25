@@ -175,7 +175,7 @@ Use ONLY the provided source items. Do not invent news.
 Write in clear Hebrew when requested, but preserve English product/model names as-is (e.g. GPT-4, Claude, OpenAI).
 Keep summaries short. Target reading time: 5 minutes.
 Submit the report using the submit_weekly_report tool. No markdown. No HTML tags. Plain text strings only.
-Limits: models_research max 3 items, products_tools max 5, business_market max 5, executive_summary 3-4 bullets, pm_takeaways 2-3 bullets.
+Limits: models_research max 3 items, products_tools max 5, business_market max 5, executive_summary 3-4 bullets, conclusions 2-3 bullets.
 Put English product/company names in the title field; keep summary and impact fields in Hebrew when Hebrew is requested."""
 
 REPORT_TOOL_NAME = "submit_weekly_report"
@@ -216,7 +216,7 @@ Call submit_weekly_report with exactly this structure:
     {{"title": "...", "summary": "...", "why_it_matters": "..."}}
   ],
   "technical_corner": {{"title": "...", "explanation": "..."}},
-  "pm_takeaways": ["actionable takeaway 1", "actionable takeaway 2"],
+  "conclusions": ["actionable takeaway 1", "actionable takeaway 2"],
   "sources": [{{"name": "OpenAI News - Codex plugins", "url": ""}}]
 }}
 
@@ -225,7 +225,7 @@ Rules:
 - models_research: maximum 3 items
 - products_tools: maximum 5 items
 - business_market: maximum 5 items
-- pm_takeaways: 2-3 actionable bullets for a PM
+- conclusions: 2-3 actionable bullets for a PM
 - title fields: use English product/company names where appropriate
 - summary/why_it_matters/relevance: Hebrew when Hebrew is requested
 - sources: up to 8 key citations as plain text lines "Source Name - Article title" in the name field (no HTML, no URLs in name)
@@ -330,10 +330,10 @@ def _report_tool_definition() -> dict[str, Any]:
                     "required": ["title", "explanation"],
                     "additionalProperties": False,
                 },
-                "pm_takeaways": {
+                "conclusions": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "2-3 actionable bullets for a PM",
+                    "description": "2-3 actionable conclusion bullets for a PM",
                 },
                 "sources": {
                     "type": "array",
@@ -353,12 +353,40 @@ def _report_tool_definition() -> dict[str, Any]:
                 "models_research",
                 "products_tools",
                 "business_market",
-                "pm_takeaways",
+                "technical_corner",
+                "conclusions",
                 "sources",
             ],
             "additionalProperties": False,
         },
     }
+
+
+def _field_value(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
+def _normalize_report_data(data: dict[str, Any]) -> dict[str, Any]:
+    log.info("Report tool input keys before normalization: %s", list(data.keys()))
+    normalized = dict(data)
+
+    if "technical_corner" not in normalized:
+        for alias in ("technical", "technical_section", "tech_corner"):
+            if alias in normalized:
+                normalized["technical_corner"] = normalized[alias]
+                break
+
+    if "conclusions" not in normalized:
+        for alias in ("pm_takeaways", "takeaways"):
+            if alias in normalized:
+                normalized["conclusions"] = normalized[alias]
+                break
+
+    log.info("Report tool input keys after normalization: %s", list(normalized.keys()))
+    return normalized
 
 
 def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
@@ -368,7 +396,7 @@ def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
             if isinstance(tool_input, dict):
                 log.info("Report data source: anthropic tool_use")
                 log.info("Report top-level keys: %s", list(tool_input.keys()))
-                return tool_input, "anthropic tool_use"
+                return _normalize_report_data(tool_input), "anthropic tool_use"
             raise ValueError("submit_weekly_report tool input was not an object")
 
     raw = ""
@@ -388,7 +416,7 @@ def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
         ) from exc
     log.info("Report data source: legacy JSON parser")
     log.info("Report top-level keys: %s", list(data.keys()))
-    return data, "legacy JSON parser"
+    return _normalize_report_data(data), "legacy JSON parser"
 
 
 def _as_list(value: Any) -> list[str]:
@@ -563,8 +591,18 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         models_research=_parse_research(data.get("models_research"))[:3],
         products_tools=_parse_products(data.get("products_tools"))[:5],
         business_market=_parse_business(data.get("business_market"))[:5],
-        technical_corner=_parse_technical(data.get("technical_corner")),
-        pm_takeaways=_as_list(data.get("pm_takeaways"))[:3],
+        technical_corner=_parse_technical(
+            _field_value(
+                data,
+                "technical_corner",
+                "technical",
+                "technical_section",
+                "tech_corner",
+            )
+        ),
+        pm_takeaways=_as_list(
+            _field_value(data, "conclusions", "pm_takeaways", "takeaways")
+        )[:3],
         sources=_parse_sources(data.get("sources")),
         scrape_status=_build_scrape_status(scrape),
         items_collected=len(scrape.items),
