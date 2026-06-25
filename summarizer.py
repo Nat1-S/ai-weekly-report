@@ -174,9 +174,11 @@ SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise wee
 Use ONLY the provided source items. Do not invent news.
 Write in clear Hebrew when requested, but preserve English product/model names as-is (e.g. GPT-4, Claude, OpenAI).
 Keep summaries short. Target reading time: 5 minutes.
-Return valid JSON only. No markdown. No code fences. No HTML tags. Plain text strings only.
+Submit the report using the submit_weekly_report tool. No markdown. No HTML tags. Plain text strings only.
 Limits: models_research max 3 items, products_tools max 5, business_market max 5, executive_summary 3-4 bullets, pm_takeaways 2-3 bullets.
 Put English product/company names in the title field; keep summary and impact fields in Hebrew when Hebrew is requested."""
+
+REPORT_TOOL_NAME = "submit_weekly_report"
 
 
 def _language_instruction() -> str:
@@ -201,7 +203,7 @@ Collected items: {len(scrape.items)}
 SOURCE ITEMS:
 {blob}
 
-Return JSON with exactly this schema:
+Call submit_weekly_report with exactly this structure:
 {{
   "executive_summary": ["bullet 1", "bullet 2"],
   "models_research": [
@@ -266,6 +268,127 @@ def _extract_json(text: str) -> dict[str, Any]:
     if isinstance(parsed, dict):
         log.info("Claude JSON top-level keys: %s", list(parsed.keys()))
     return parsed
+
+
+def _report_tool_definition() -> dict[str, Any]:
+    return {
+        "name": REPORT_TOOL_NAME,
+        "description": "Submit the structured weekly AI intelligence report.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "executive_summary": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "3-4 short executive summary bullets",
+                },
+                "models_research": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "why_it_matters": {"type": "string"},
+                        },
+                        "required": ["title", "summary", "why_it_matters"],
+                        "additionalProperties": False,
+                    },
+                },
+                "products_tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "relevance": {"type": "string"},
+                        },
+                        "required": ["title", "summary", "relevance"],
+                        "additionalProperties": False,
+                    },
+                },
+                "business_market": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "why_it_matters": {"type": "string"},
+                        },
+                        "required": ["title", "summary", "why_it_matters"],
+                        "additionalProperties": False,
+                    },
+                },
+                "technical_corner": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["title", "explanation"],
+                    "additionalProperties": False,
+                },
+                "pm_takeaways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "2-3 actionable bullets for a PM",
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "url": {"type": "string"},
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "executive_summary",
+                "models_research",
+                "products_tools",
+                "business_market",
+                "pm_takeaways",
+                "sources",
+            ],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
+    for block in message.content:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == REPORT_TOOL_NAME:
+            tool_input = getattr(block, "input", None)
+            if isinstance(tool_input, dict):
+                log.info("Report data source: anthropic tool_use")
+                log.info("Report top-level keys: %s", list(tool_input.keys()))
+                return tool_input, "anthropic tool_use"
+            raise ValueError("submit_weekly_report tool input was not an object")
+
+    raw = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            raw += block.text
+
+    if not raw.strip():
+        raise ValueError("Claude returned neither tool_use nor text content")
+
+    log.warning("No tool_use block found; falling back to legacy JSON parser")
+    try:
+        data = _extract_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(
+            "Claude returned neither valid tool_use nor parseable JSON"
+        ) from exc
+    log.info("Report data source: legacy JSON parser")
+    log.info("Report top-level keys: %s", list(data.keys()))
+    return data, "legacy JSON parser"
 
 
 def _as_list(value: Any) -> list[str]:
@@ -415,21 +538,18 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_user_prompt(scrape)}],
+            tools=[_report_tool_definition()],
+            tool_choice={"type": "tool", "name": REPORT_TOOL_NAME},
         )
     except Exception as exc:
         raise RuntimeError(
             f"Claude API call failed (model={model}): {exc}"
         ) from exc
 
-    raw = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            raw += block.text
-
     try:
-        data = _extract_json(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise RuntimeError(f"Failed to parse Claude JSON response: {exc}") from exc
+        data, _source = _report_data_from_message(message)
+    except ValueError as exc:
+        raise RuntimeError(f"Failed to parse Claude report response: {exc}") from exc
     report_date, period_display, period_start, period_end = _format_period(
         datetime.now(config.LOCAL_TZ)
     )

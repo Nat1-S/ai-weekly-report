@@ -1,10 +1,11 @@
-"""Tests for summarizer._extract_json only."""
+"""Tests for structured report extraction from Anthropic responses."""
 
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock
 
-from summarizer import _extract_json
+from summarizer import REPORT_TOOL_NAME, _extract_json, _report_data_from_message
 
 
 class TestExtractJson(unittest.TestCase):
@@ -22,27 +23,48 @@ class TestExtractJson(unittest.TestCase):
         data = _extract_json(text)
         self.assertEqual(data["executive_summary"], ["c"])
 
-    def test_executive_summary_list_passes(self) -> None:
-        text = '{ "executive_summary": ["bullet one", "bullet two"], "models_research": [] }'
-        data = _extract_json(text)
-        self.assertIsInstance(data, dict)
-        self.assertEqual(data["executive_summary"], ["bullet one", "bullet two"])
-
-    def test_object_not_replaced_by_inner_array(self) -> None:
-        text = (
-            'Here is the report:\n'
-            '{ "executive_summary": ["a", "b"], "models_research": [], "pm_takeaways": ["x"] }\n'
-            "Thanks!"
-        )
-        data = _extract_json(text)
-        self.assertIsInstance(data, dict)
-        self.assertIn("models_research", data)
-        self.assertIn("pm_takeaways", data)
-
     def test_invalid_json_still_fails(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             _extract_json("This is not JSON at all.")
         self.assertIn("invalid JSON", str(ctx.exception))
+
+
+class TestReportDataFromMessage(unittest.TestCase):
+    def test_uses_tool_input_when_present(self) -> None:
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.name = REPORT_TOOL_NAME
+        tool_block.input = {
+            "executive_summary": ["bullet"],
+            "models_research": [],
+            "products_tools": [],
+            "business_market": [],
+            "pm_takeaways": [],
+            "sources": [],
+        }
+        message = MagicMock(content=[tool_block])
+
+        data, source = _report_data_from_message(message)
+
+        self.assertEqual(source, "anthropic tool_use")
+        self.assertEqual(data["executive_summary"], ["bullet"])
+
+    def test_falls_back_to_legacy_json_parser(self) -> None:
+        text_block = MagicMock()
+        text_block.text = '{"executive_summary": ["legacy"], "models_research": []}'
+        message = MagicMock(content=[text_block])
+
+        data, source = _report_data_from_message(message)
+
+        self.assertEqual(source, "legacy JSON parser")
+        self.assertEqual(data["executive_summary"], ["legacy"])
+
+    def test_fails_when_both_paths_unavailable(self) -> None:
+        message = MagicMock(content=[])
+
+        with self.assertRaises(ValueError) as ctx:
+            _report_data_from_message(message)
+        self.assertIn("neither tool_use nor text", str(ctx.exception))
 
 
 if __name__ == "__main__":
