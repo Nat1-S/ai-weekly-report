@@ -22,6 +22,23 @@ class TestExtractJson(unittest.TestCase):
         data = _extract_json(text)
         self.assertEqual(data["executive_summary"], ["c"])
 
+    def test_executive_summary_list_passes(self) -> None:
+        text = '{ "executive_summary": ["bullet one", "bullet two"], "models_research": [] }'
+        data = _extract_json(text)
+        self.assertIsInstance(data, dict)
+        self.assertEqual(data["executive_summary"], ["bullet one", "bullet two"])
+
+    def test_object_not_replaced_by_inner_array(self) -> None:
+        text = (
+            'Here is the report:\n'
+            '{ "executive_summary": ["a", "b"], "models_research": [], "pm_takeaways": ["x"] }\n'
+            "Thanks!"
+        )
+        data = _extract_json(text)
+        self.assertIsInstance(data, dict)
+        self.assertIn("models_research", data)
+        self.assertIn("pm_takeaways", data)
+
     def test_invalid_json_still_fails(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             _extract_json("This is not JSON at all.")

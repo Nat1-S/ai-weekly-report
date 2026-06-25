@@ -263,18 +263,18 @@ def _balanced_json_span(text: str, start: int, opener: str, closer: str) -> str 
     return None
 
 
-def _first_balanced_json_span(text: str) -> str | None:
-    candidates: list[tuple[int, str]] = []
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
+def _iter_balanced_object_spans(text: str):
+    pos = 0
+    while pos < len(text):
+        start = text.find("{", pos)
         if start == -1:
-            continue
-        span = _balanced_json_span(text, start, opener, closer)
+            break
+        span = _balanced_json_span(text, start, "{", "}")
         if span:
-            candidates.append((start, span))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda item: item[0])[1]
+            yield span
+            pos = start + 1
+        else:
+            pos = start + 1
 
 
 def _safe_json_preview(text: str, limit: int = 200) -> str:
@@ -283,37 +283,54 @@ def _safe_json_preview(text: str, limit: int = 200) -> str:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    text = text.strip()
+    text = text.strip().lstrip("\ufeff")
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
 
     last_error: Exception | None = None
 
-    def try_parse(candidate: str) -> dict[str, Any] | None:
+    def try_parse(candidate: str, label: str) -> dict[str, Any] | None:
         nonlocal last_error
         try:
             parsed = json.loads(candidate)
+            log.info(
+                "Claude JSON parse (%s): top-level type=%s",
+                label,
+                type(parsed).__name__,
+            )
             if isinstance(parsed, dict):
+                log.info("Claude JSON top-level keys: %s", list(parsed.keys()))
                 return parsed
-            last_error = ValueError("Expected JSON object")
+            log.warning(
+                "Claude JSON parse (%s): skipping non-object top-level %s",
+                label,
+                type(parsed).__name__,
+            )
+            last_error = ValueError(f"Expected JSON object, got {type(parsed).__name__}")
         except json.JSONDecodeError as exc:
+            log.warning(
+                "Claude JSON parse (%s): JSONDecodeError at %s: %s",
+                label,
+                exc.pos,
+                exc.msg,
+            )
             last_error = exc
         return None
 
-    for candidate in (text, _unwrap_markdown_fence(text) or ""):
-        if not candidate:
-            continue
-        parsed = try_parse(candidate)
+    candidates: list[tuple[str, str]] = [("direct", text)]
+    fenced = _unwrap_markdown_fence(text)
+    if fenced and fenced != text:
+        candidates.append(("fenced", fenced))
+
+    for label, candidate in candidates:
+        parsed = try_parse(candidate, label)
         if parsed is not None:
             return parsed
 
-    for source in (text, _unwrap_markdown_fence(text) or ""):
-        if not source:
-            continue
-        span = _first_balanced_json_span(source)
-        if span:
-            parsed = try_parse(span)
+    for label, source in candidates:
+        for span in _iter_balanced_object_spans(source):
+            parsed = try_parse(span, f"{label}-object-span")
             if parsed is not None:
                 return parsed
 
