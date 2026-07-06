@@ -8,7 +8,7 @@ import sys
 import traceback
 
 from scraper import scrape_all
-from sender import send_email
+from sender import _email_recipients, send_email
 from summarizer import summarize
 
 logging.basicConfig(
@@ -44,7 +44,7 @@ def main() -> int:
         )
 
         send_email(report)
-        log.info("HTML email sent to %s", __import__("config").EMAIL_RECIPIENT)
+        log.info("HTML email sent to %s", ", ".join(_email_recipients()))
 
         log.info("Pipeline completed successfully")
         return 0

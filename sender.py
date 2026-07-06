@@ -397,9 +397,18 @@ def build_html_email(report: ReportContent) -> str:
 </html>"""
 
 
+def _email_recipients() -> list[str]:
+    raw = config.EMAIL_RECIPIENT or ""
+    return [address.strip() for address in raw.split(",") if address.strip()]
+
+
 def send_email(report: ReportContent) -> None:
     if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
         raise ValueError("GMAIL_USER and GMAIL_APP_PASSWORD must be set")
+
+    recipients = _email_recipients()
+    if not recipients:
+        raise ValueError("EMAIL_RECIPIENT must be set")
 
     html_body = build_html_email(report)
     _validate_report_html(html_body, _labels())
@@ -409,10 +418,10 @@ def send_email(report: ReportContent) -> None:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = config.GMAIL_USER
-    msg["To"] = config.EMAIL_RECIPIENT
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
         server.login(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
-        server.sendmail(config.GMAIL_USER, [config.EMAIL_RECIPIENT], msg.as_string())
+        server.sendmail(config.GMAIL_USER, recipients, msg.as_string())
