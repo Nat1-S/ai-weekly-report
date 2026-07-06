@@ -8,7 +8,7 @@ import sys
 import traceback
 
 from scraper import scrape_all
-from sender import _email_recipients, send_email
+from sender import _email_recipients, _error_recipients, send_email, send_error_email
 from summarizer import summarize
 
 logging.basicConfig(
@@ -17,6 +17,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+def _notify_failure(message: str, details: str = "") -> None:
+    try:
+        send_error_email(message, details)
+        log.info("Failure notification sent to %s", ", ".join(_error_recipients()))
+    except Exception:
+        log.error("Failed to send failure notification:\n%s", traceback.format_exc())
 
 
 def main() -> int:
@@ -34,6 +42,7 @@ def main() -> int:
 
         if not scrape.items:
             log.error("No items collected — aborting to avoid empty report")
+            _notify_failure("No items collected — aborting to avoid empty report")
             return 1
 
         report = summarize(scrape)
@@ -49,7 +58,9 @@ def main() -> int:
         log.info("Pipeline completed successfully")
         return 0
     except Exception:
-        log.error("Pipeline failed:\n%s", traceback.format_exc())
+        tb = traceback.format_exc()
+        log.error("Pipeline failed:\n%s", tb)
+        _notify_failure("Pipeline failed", tb)
         return 1
 
 

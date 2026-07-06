@@ -11,6 +11,7 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-5"
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT") or GMAIL_USER
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip()
 EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX") or "AI Weekly Report"
 
 REPORT_LANGUAGE = os.environ.get("REPORT_LANGUAGE") or "hebrew"

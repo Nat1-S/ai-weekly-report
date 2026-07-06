@@ -397,9 +397,52 @@ def build_html_email(report: ReportContent) -> str:
 </html>"""
 
 
-def _email_recipients() -> list[str]:
-    raw = config.EMAIL_RECIPIENT or ""
+def _parse_email_addresses(raw: str) -> list[str]:
     return [address.strip() for address in raw.split(",") if address.strip()]
+
+
+def _email_recipients() -> list[str]:
+    return _parse_email_addresses(config.EMAIL_RECIPIENT or "")
+
+
+def _error_recipients() -> list[str]:
+    if config.ADMIN_EMAIL:
+        return [config.ADMIN_EMAIL]
+    recipients = _email_recipients()
+    if recipients:
+        return [recipients[0]]
+    return []
+
+
+def send_error_email(error_message: str, details: str = "") -> None:
+    if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
+        raise ValueError("GMAIL_USER and GMAIL_APP_PASSWORD must be set")
+
+    recipients = _error_recipients()
+    if not recipients:
+        raise ValueError("No admin recipient configured for failure notifications")
+
+    he = _is_hebrew_report()
+    if he:
+        subject = f"{config.EMAIL_SUBJECT_PREFIX} — לא הצליח לייצר דוח"
+        heading = "לא הצליח לייצר דוח"
+    else:
+        subject = f"{config.EMAIL_SUBJECT_PREFIX} — Failed to generate report"
+        heading = "Failed to generate report"
+
+    plain_body = f"{heading}\n\n{error_message}"
+    if details.strip():
+        plain_body = f"{plain_body}\n\n{details.strip()}"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = config.GMAIL_USER
+    msg["To"] = recipients[0]
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+        server.login(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
+        server.sendmail(config.GMAIL_USER, recipients, msg.as_string())
 
 
 def send_email(report: ReportContent) -> None:
