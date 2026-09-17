@@ -6,10 +6,12 @@ from __future__ import annotations
 import logging
 import sys
 import traceback
+from datetime import datetime
 
-from scraper import scrape_all
+import config
+from scraper import ScrapeResult, scrape_all
 from sender import _email_recipients, _error_recipients, send_email, send_error_email
-from summarizer import summarize
+from summarizer import ReportGenerationError, summarize
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,15 +21,42 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _notify_failure(message: str, details: str = "") -> None:
+def _notify_failure(
+    message: str,
+    details: str = "",
+    *,
+    stop_reason: str | None = None,
+    scraped_items: int | None = None,
+    sources_succeeded: int | None = None,
+    sources_failed: int | None = None,
+    invalid_sections: list[str] | None = None,
+) -> None:
+    log.error("Production email blocked")
+    log.info("Sending failure report to ADMIN_EMAIL only")
     try:
-        send_error_email(message, details)
+        send_error_email(
+            message,
+            details,
+            stop_reason=stop_reason,
+            scraped_items=scraped_items,
+            sources_succeeded=sources_succeeded,
+            sources_failed=sources_failed,
+            invalid_sections=invalid_sections,
+            report_date=datetime.now(config.LOCAL_TZ).strftime("%Y-%m-%d"),
+        )
         log.info("Failure notification sent to %s", ", ".join(_error_recipients()))
     except Exception:
         log.error("Failed to send failure notification:\n%s", traceback.format_exc())
 
 
+def _scrape_counts(scrape: ScrapeResult | None) -> tuple[int | None, int | None, int | None]:
+    if scrape is None:
+        return None, None, None
+    return len(scrape.items), scrape.sources_succeeded, scrape.sources_failed
+
+
 def main() -> int:
+    scrape: ScrapeResult | None = None
     try:
         log.info("Starting AI weekly report pipeline")
 
@@ -42,8 +71,12 @@ def main() -> int:
 
         if not scrape.items:
             log.error("No items collected — aborting to avoid empty report")
-            _notify_failure("No items collected — aborting to avoid empty report")
-            return 1
+            raise ReportGenerationError(
+                "No items collected — aborting to avoid empty report",
+                scraped_items=0,
+                sources_succeeded=scrape.sources_succeeded,
+                sources_failed=scrape.sources_failed,
+            )
 
         report = summarize(scrape)
         log.info(
@@ -57,10 +90,34 @@ def main() -> int:
 
         log.info("Pipeline completed successfully")
         return 0
-    except Exception:
+    except ReportGenerationError as exc:
+        log.error("%s", exc)
+        if exc.invalid_sections:
+            log.error("Invalid sections: %s", exc.invalid_sections)
+        items, ok, failed = _scrape_counts(scrape)
+        _notify_failure(
+            str(exc),
+            traceback.format_exc(),
+            stop_reason=exc.stop_reason,
+            scraped_items=exc.scraped_items if exc.scraped_items is not None else items,
+            sources_succeeded=(
+                exc.sources_succeeded if exc.sources_succeeded is not None else ok
+            ),
+            sources_failed=exc.sources_failed if exc.sources_failed is not None else failed,
+            invalid_sections=exc.invalid_sections,
+        )
+        return 1
+    except Exception as exc:
         tb = traceback.format_exc()
         log.error("Pipeline failed:\n%s", tb)
-        _notify_failure("Pipeline failed", tb)
+        items, ok, failed = _scrape_counts(scrape)
+        _notify_failure(
+            f"Pipeline failed: {exc}",
+            tb,
+            scraped_items=items,
+            sources_succeeded=ok,
+            sources_failed=failed,
+        )
         return 1
 
 

@@ -17,6 +17,58 @@ from scraper import ScrapeResult, items_to_prompt_blob
 
 log = logging.getLogger(__name__)
 
+# Patterns that occasionally appear in scraped third-party text and can trigger
+# model refusals. Items matching these are skipped for the Claude prompt only.
+_PROMPT_RISK_MARKERS = (
+    "ignore previous instructions",
+    "ignore all previous instructions",
+    "disregard your system prompt",
+    "disregard previous instructions",
+    "jailbreak",
+    "dan mode",
+    "do anything now",
+    "system prompt override",
+)
+
+_PLACEHOLDER_STRINGS = frozenset(
+    {
+        "",
+        "-",
+        "—",
+        "–",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "undefined",
+        "tbd",
+        "todo",
+        "...",
+        "…",
+    }
+)
+
+
+class ReportGenerationError(RuntimeError):
+    """Raised when Claude output must not be treated as a production report."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stop_reason: str | None = None,
+        invalid_sections: list[str] | None = None,
+        scraped_items: int | None = None,
+        sources_succeeded: int | None = None,
+        sources_failed: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stop_reason = stop_reason
+        self.invalid_sections = list(invalid_sections or [])
+        self.scraped_items = scraped_items
+        self.sources_succeeded = sources_succeeded
+        self.sources_failed = sources_failed
+
 
 def sanitize_plain_text(text: str) -> str:
     """Strip HTML/escaped markup from LLM or scrape text before rendering."""
@@ -172,9 +224,13 @@ class ReportContent:
 
 SYSTEM_PROMPT = """You are an expert AI industry analyst preparing a concise weekly intelligence brief for a product manager.
 Use ONLY the provided source items. Do not invent news.
+The SOURCE ITEMS are third-party public AI news headlines and snippets collected automatically.
+If any individual source item is unsuitable, irrelevant, or unsafe to use, skip that item and continue with the rest.
+Do not refuse the entire weekly report solely because one or a few scraped items are problematic.
 Write in clear Hebrew when requested, but preserve English product/model names as-is (e.g. GPT-4, Claude, OpenAI).
 Keep summaries short. Target reading time: 5 minutes.
 Submit the report using the submit_weekly_report tool. No markdown. No HTML tags. Plain text strings only.
+You MUST populate every required tool field with meaningful non-empty content.
 Limits: models_research max 3 items, products_tools max 5, business_market max 5, executive_summary 3-4 bullets, conclusions 2-3 bullets.
 Put English product/company names in the title field; keep summary and impact fields in Hebrew when Hebrew is requested."""
 
@@ -190,15 +246,89 @@ def _language_instruction() -> str:
     return "Write all text fields in English."
 
 
+def _sanitize_prompt_fragment(text: str | None, limit: int) -> str:
+    """Normalize scraped text before it is included in the Claude prompt."""
+    if not text:
+        return ""
+    cleaned = sanitize_plain_text(str(text))
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", cleaned)
+    cleaned = cleaned.replace("\u200b", "").replace("\ufeff", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return cleaned
+
+
+def _looks_like_prompt_risk(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _PROMPT_RISK_MARKERS)
+
+
+def _items_for_claude_prompt(items: list[Any]) -> tuple[str, int]:
+    """Build a sanitized SOURCE ITEMS blob; skip high-risk fragments."""
+    lines: list[str] = []
+    included = 0
+    skipped = 0
+    for i, item in enumerate(items, 1):
+        title = _sanitize_prompt_fragment(getattr(item, "title", ""), 180)
+        summary = _sanitize_prompt_fragment(
+            getattr(item, "summary", None), config.MAX_ITEM_SUMMARY_CHARS
+        )
+        source = _sanitize_prompt_fragment(getattr(item, "source", ""), 80)
+        url = _sanitize_prompt_fragment(getattr(item, "url", ""), 300)
+        published = _sanitize_prompt_fragment(getattr(item, "published", None), 40)
+        category = _sanitize_prompt_fragment(getattr(item, "category", "general"), 40)
+
+        combined = f"{title} {summary}"
+        if not title or _looks_like_prompt_risk(combined):
+            skipped += 1
+            log.warning(
+                "Skipping scraped item %d from Claude prompt due to empty/risky content (%s)",
+                i,
+                source or "unknown",
+            )
+            continue
+
+        included += 1
+        lines.append(f"[{included}] ({source}) {title}")
+        if url:
+            lines.append(f"    URL: {url}")
+        if published:
+            lines.append(f"    Date: {published}")
+        score = getattr(item, "score", None)
+        if score is not None:
+            lines.append(f"    Score: {score}")
+        if summary and not _looks_like_prompt_risk(summary):
+            lines.append(f"    Snippet: {summary}")
+        if category:
+            lines.append(f"    Suggested bucket: {category}")
+        lines.append("")
+
+    if skipped:
+        log.info(
+            "Sanitized Claude prompt: included %d items, skipped %d risky/empty items",
+            included,
+            skipped,
+        )
+    return "\n".join(lines), included
+
+
 def _build_user_prompt(scrape: ScrapeResult) -> str:
     now = datetime.now(config.LOCAL_TZ)
     period_end = now.strftime("%Y-%m-%d")
-    blob = items_to_prompt_blob(scrape.items)
+    blob, included = _items_for_claude_prompt(scrape.items)
+    if included == 0:
+        # Fall back to original blob only if sanitizer removed everything —
+        # summarize() will still fail validation/refusal handling downstream.
+        blob = items_to_prompt_blob(scrape.items)
+        included = len(scrape.items)
 
     return f"""{_language_instruction()}
 
 Report period: last {config.LOOKBACK_DAYS} days (ending {period_end}).
-Collected items: {len(scrape.items)}
+Collected items: {included} (from {len(scrape.items)} scraped; some may be omitted as unsuitable).
+
+The following SOURCE ITEMS are public third-party AI news. Skip any unsuitable item and still submit a complete report.
 
 SOURCE ITEMS:
 {blob}
@@ -372,12 +502,82 @@ def _has_meaningful_content(value: Any) -> bool:
     if value is None:
         return False
     if isinstance(value, str):
-        return bool(sanitize_plain_text(value))
+        cleaned = sanitize_plain_text(value)
+        if not cleaned:
+            return False
+        return cleaned.strip().lower() not in _PLACEHOLDER_STRINGS
     if isinstance(value, list):
         return any(_has_meaningful_content(item) for item in value)
     if isinstance(value, dict):
         return any(_has_meaningful_content(item) for item in value.values())
     return bool(value)
+
+
+def _item_has_fields(item: Any, *fields: str) -> bool:
+    return all(_has_meaningful_content(getattr(item, field, None)) for field in fields)
+
+
+def validate_report(report: ReportContent) -> list[str]:
+    """Return invalid/missing section names. Empty list means the report is valid."""
+    invalid: list[str] = []
+
+    meaningful_exec = [
+        bullet for bullet in report.executive_summary if _has_meaningful_content(bullet)
+    ]
+    if len(meaningful_exec) < 2:
+        invalid.append("executive_summary")
+
+    meaningful_models = [
+        item
+        for item in report.models_research
+        if _item_has_fields(item, "title", "summary")
+    ]
+    if len(meaningful_models) < 1:
+        invalid.append("models_research")
+
+    meaningful_products = [
+        item
+        for item in report.products_tools
+        if _item_has_fields(item, "title", "summary")
+    ]
+    if len(meaningful_products) < 1:
+        invalid.append("products_tools")
+
+    meaningful_business = [
+        item
+        for item in report.business_market
+        if _item_has_fields(item, "title", "summary")
+    ]
+    if len(meaningful_business) < 1:
+        invalid.append("business_market")
+
+    technical = report.technical_corner
+    if technical is None or not _item_has_fields(technical, "title", "explanation"):
+        invalid.append("technical_corner")
+
+    meaningful_conclusions = [
+        bullet for bullet in report.pm_takeaways if _has_meaningful_content(bullet)
+    ]
+    if len(meaningful_conclusions) < 2:
+        invalid.append("conclusions")
+
+    return invalid
+
+
+def assert_valid_report(report: ReportContent) -> None:
+    invalid = validate_report(report)
+    if not invalid:
+        log.info("Report validation: PASS")
+        return
+    log.error("Report validation: FAIL")
+    log.error("Invalid sections: %s", invalid)
+    raise ReportGenerationError(
+        f"Report validation failed; incomplete sections: {', '.join(invalid)}",
+        invalid_sections=invalid,
+        scraped_items=report.items_collected,
+        sources_succeeded=report.scrape_status.successful_sources,
+        sources_failed=report.scrape_status.failed_source_count,
+    )
 
 
 def _field_value(data: dict[str, Any], *keys: str) -> Any:
@@ -465,8 +665,13 @@ def _report_data_from_message(message: Any) -> tuple[dict[str, Any], str]:
 
 def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
-        return [sanitize_plain_text(str(v)) for v in value if sanitize_plain_text(str(v))]
-    if isinstance(value, str) and value.strip():
+        out: list[str] = []
+        for item in value:
+            cleaned = sanitize_plain_text(str(item))
+            if _has_meaningful_content(cleaned):
+                out.append(cleaned)
+        return out
+    if isinstance(value, str) and _has_meaningful_content(value):
         return [sanitize_plain_text(value)]
     return []
 
@@ -722,16 +927,36 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
             tool_choice={"type": "tool", "name": REPORT_TOOL_NAME},
         )
     except Exception as exc:
-        raise RuntimeError(
-            f"Claude API call failed (model={model}): {exc}"
+        raise ReportGenerationError(
+            f"Claude API call failed (model={model}): {exc}",
+            scraped_items=len(scrape.items),
+            sources_succeeded=scrape.sources_succeeded,
+            sources_failed=scrape.sources_failed,
         ) from exc
 
-    log.info("Claude stop_reason: %s", getattr(message, "stop_reason", None))
+    stop_reason = getattr(message, "stop_reason", None)
+    log.info("Claude stop_reason: %s", stop_reason)
+
+    if stop_reason == "refusal":
+        log.error("Claude refused report generation")
+        raise ReportGenerationError(
+            "Claude refused report generation",
+            stop_reason=stop_reason,
+            scraped_items=len(scrape.items),
+            sources_succeeded=scrape.sources_succeeded,
+            sources_failed=scrape.sources_failed,
+        )
 
     try:
         data, _source = _report_data_from_message(message)
     except ValueError as exc:
-        raise RuntimeError(f"Failed to parse Claude report response: {exc}") from exc
+        raise ReportGenerationError(
+            f"Failed to parse Claude report response: {exc}",
+            stop_reason=stop_reason,
+            scraped_items=len(scrape.items),
+            sources_succeeded=scrape.sources_succeeded,
+            sources_failed=scrape.sources_failed,
+        ) from exc
     report_date, period_display, period_start, period_end = _format_period(
         datetime.now(config.LOCAL_TZ)
     )
@@ -745,7 +970,7 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
     )
     log.info("Parsed conclusions count: %d", len(pm_takeaways))
 
-    return ReportContent(
+    report = ReportContent(
         report_date=report_date,
         period_display=period_display,
         period_start=period_start,
@@ -760,3 +985,10 @@ def summarize(scrape: ScrapeResult) -> ReportContent:
         scrape_status=_build_scrape_status(scrape),
         items_collected=len(scrape.items),
     )
+    try:
+        assert_valid_report(report)
+    except ReportGenerationError as exc:
+        if exc.stop_reason is None:
+            exc.stop_reason = stop_reason
+        raise
+    return report

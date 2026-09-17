@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 import smtplib
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -414,7 +415,17 @@ def _error_recipients() -> list[str]:
     return []
 
 
-def send_error_email(error_message: str, details: str = "") -> None:
+def send_error_email(
+    error_message: str,
+    details: str = "",
+    *,
+    stop_reason: str | None = None,
+    scraped_items: int | None = None,
+    sources_succeeded: int | None = None,
+    sources_failed: int | None = None,
+    invalid_sections: list[str] | None = None,
+    report_date: str | None = None,
+) -> None:
     if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
         raise ValueError("GMAIL_USER and GMAIL_APP_PASSWORD must be set")
 
@@ -422,17 +433,32 @@ def send_error_email(error_message: str, details: str = "") -> None:
     if not recipients:
         raise ValueError("No admin recipient configured for failure notifications")
 
-    he = _is_hebrew_report()
-    if he:
-        subject = f"{config.EMAIL_SUBJECT_PREFIX} — לא הצליח לייצר דוח"
-        heading = "לא הצליח לייצר דוח"
-    else:
-        subject = f"{config.EMAIL_SUBJECT_PREFIX} — Failed to generate report"
-        heading = "Failed to generate report"
+    day = report_date or datetime.now(config.LOCAL_TZ).strftime("%Y-%m-%d")
+    subject = f"⚠️ AI Weekly Report failed - {day}"
 
-    plain_body = f"{heading}\n\n{error_message}"
+    lines = [
+        "AI Weekly Report generation FAILED.",
+        "",
+        f"Failure reason: {error_message}",
+        f"Claude stop_reason: {stop_reason if stop_reason is not None else 'n/a'}",
+        f"Scraped items: {scraped_items if scraped_items is not None else 'n/a'}",
+        (
+            "Sources succeeded/failed: "
+            f"{sources_succeeded if sources_succeeded is not None else 'n/a'}"
+            f" / {sources_failed if sources_failed is not None else 'n/a'}"
+        ),
+        (
+            "Missing/invalid report sections: "
+            + (", ".join(invalid_sections) if invalid_sections else "n/a")
+        ),
+        "",
+        "Production distribution list was NOT emailed.",
+        "This diagnostic message was sent ONLY to ADMIN_EMAIL.",
+    ]
     if details.strip():
-        plain_body = f"{plain_body}\n\n{details.strip()}"
+        lines.extend(["", "Additional details:", details.strip()])
+
+    plain_body = "\n".join(lines)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
