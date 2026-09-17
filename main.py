@@ -30,6 +30,13 @@ def _notify_failure(
     sources_succeeded: int | None = None,
     sources_failed: int | None = None,
     invalid_sections: list[str] | None = None,
+    stop_details: str | None = None,
+    isolation_attempted: bool | None = None,
+    problematic_items: list[str] | None = None,
+    items_excluded: int | None = None,
+    final_item_count: int | None = None,
+    recovery_succeeded: bool | None = None,
+    initial_item_count: int | None = None,
 ) -> None:
     log.error("Production email blocked")
     log.info("Sending failure report to ADMIN_EMAIL only")
@@ -43,6 +50,13 @@ def _notify_failure(
             sources_failed=sources_failed,
             invalid_sections=invalid_sections,
             report_date=datetime.now(config.LOCAL_TZ).strftime("%Y-%m-%d"),
+            stop_details=stop_details,
+            isolation_attempted=isolation_attempted,
+            problematic_items=problematic_items,
+            items_excluded=items_excluded,
+            final_item_count=final_item_count,
+            recovery_succeeded=recovery_succeeded,
+            initial_item_count=initial_item_count,
         )
         log.info("Failure notification sent to %s", ", ".join(_error_recipients()))
     except Exception:
@@ -105,6 +119,13 @@ def main() -> int:
             ),
             sources_failed=exc.sources_failed if exc.sources_failed is not None else failed,
             invalid_sections=exc.invalid_sections,
+            stop_details=exc.stop_details,
+            isolation_attempted=exc.isolation_attempted,
+            problematic_items=exc.problematic_items,
+            items_excluded=exc.items_excluded,
+            final_item_count=exc.final_item_count,
+            recovery_succeeded=exc.recovery_succeeded,
+            initial_item_count=exc.initial_item_count,
         )
         return 1
     except Exception as exc:

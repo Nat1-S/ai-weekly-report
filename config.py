@@ -81,3 +81,9 @@ NITTER_RSS_INSTANCES = [
 MAX_ITEMS_PER_SOURCE = int(os.environ.get("MAX_ITEMS_PER_SOURCE", "12"))
 MAX_TOTAL_ITEMS = int(os.environ.get("MAX_TOTAL_ITEMS", "120"))
 MAX_ITEM_SUMMARY_CHARS = int(os.environ.get("MAX_ITEM_SUMMARY_CHARS", "400"))
+
+# Refusal isolation / coverage thresholds
+MIN_ITEMS_FOR_REPORT = int(os.environ.get("MIN_ITEMS_FOR_REPORT", "15"))
+MIN_ITEM_RETENTION_RATIO = float(os.environ.get("MIN_ITEM_RETENTION_RATIO", "0.4"))
+MAX_REFUSAL_PROBE_CALLS = int(os.environ.get("MAX_REFUSAL_PROBE_CALLS", "6"))
+MAX_REFUSAL_RECOVERY_CALLS = int(os.environ.get("MAX_REFUSAL_RECOVERY_CALLS", "1"))

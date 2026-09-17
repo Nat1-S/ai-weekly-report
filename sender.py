@@ -425,6 +425,13 @@ def send_error_email(
     sources_failed: int | None = None,
     invalid_sections: list[str] | None = None,
     report_date: str | None = None,
+    stop_details: str | None = None,
+    isolation_attempted: bool | None = None,
+    problematic_items: list[str] | None = None,
+    items_excluded: int | None = None,
+    final_item_count: int | None = None,
+    recovery_succeeded: bool | None = None,
+    initial_item_count: int | None = None,
 ) -> None:
     if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
         raise ValueError("GMAIL_USER and GMAIL_APP_PASSWORD must be set")
@@ -441,6 +448,7 @@ def send_error_email(
         "",
         f"Failure reason: {error_message}",
         f"Claude stop_reason: {stop_reason if stop_reason is not None else 'n/a'}",
+        f"Claude stop_details: {stop_details if stop_details else 'n/a'}",
         f"Scraped items: {scraped_items if scraped_items is not None else 'n/a'}",
         (
             "Sources succeeded/failed: "
@@ -450,6 +458,40 @@ def send_error_email(
         (
             "Missing/invalid report sections: "
             + (", ".join(invalid_sections) if invalid_sections else "n/a")
+        ),
+        "",
+        "Claude refusal diagnostics:",
+        (
+            "Claude refusal detected"
+            if stop_reason == "refusal"
+            else "Claude refusal detected: no"
+        ),
+        f"Initial item count: {initial_item_count if initial_item_count is not None else 'n/a'}",
+        (
+            "Isolation attempted: "
+            + (
+                "yes"
+                if isolation_attempted is True
+                else "no"
+                if isolation_attempted is False
+                else "n/a"
+            )
+        ),
+        (
+            "Problematic items identified: "
+            + (", ".join(problematic_items) if problematic_items else "n/a")
+        ),
+        f"Items excluded: {items_excluded if items_excluded is not None else 'n/a'}",
+        f"Final item count: {final_item_count if final_item_count is not None else 'n/a'}",
+        (
+            "Recovery succeeded: "
+            + (
+                "yes"
+                if recovery_succeeded is True
+                else "no"
+                if recovery_succeeded is False
+                else "n/a"
+            )
         ),
         "",
         "Production distribution list was NOT emailed.",
